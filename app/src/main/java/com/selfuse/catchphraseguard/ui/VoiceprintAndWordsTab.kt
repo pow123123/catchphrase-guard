@@ -77,19 +77,19 @@ private data class EnrollStepSpec(
 
 private val ENROLL_STEPS = listOf(
     EnrollStepSpec(
-        stepTitle = "第 1/3 步 · 近场日常语速",
-        distanceHint = "手持手机距嘴约 20 厘米，用平时聊天的自然音量读出：",
-        scriptToRead = "“今天状态不错，我们把接下来的计划理一理。”"
+        stepTitle = "第 1/3 步 · 放松聊天语气",
+        distanceHint = "不要用朗读腔，就像平时跟朋友随口闲聊一样自然说出：",
+        scriptToRead = "“没有啊，我觉得这个事情其实还好吧。”"
     ),
     EnrollStepSpec(
-        stepTitle = "第 2/3 步 · 口头禅连读习惯",
-        distanceHint = "用你平时脱口而出的自然快语速读出：",
-        scriptToRead = "“没有没有，不是你想的那个意思，真没有。”"
+        stepTitle = "第 2/3 步 · 随口快说口头禅",
+        distanceHint = "模仿你平时脱口而出、稍微含糊连读的习惯快速说：",
+        scriptToRead = "“不是，没有没有，真不是你想的那样。”"
     ),
     EnrollStepSpec(
-        stepTitle = "第 3/3 步 · 桌面/口袋远场模拟",
-        distanceHint = "把手机拿远一臂距离再读，确保放桌上也能精准认出你：",
-        scriptToRead = "“不是这个问题，我刚才没有这么说。”"
+        stepTitle = "第 3/3 步 · 放桌面/拿远距离",
+        distanceHint = "把手机拿远一臂（或直接放桌上），用日常音量随口说：",
+        scriptToRead = "“不是这个问题，我刚才真没有看到。”"
     )
 )
 
@@ -143,9 +143,12 @@ fun VoiceprintAndWordsTab(
         VoiceprintEnrollWizardDialog(
             onDismiss = { showEnrollDialog = false },
             onFinished = { collectedEmbeddings ->
-                MonitorStateStore.saveEnrolledVoiceprint(collectedEmbeddings)
+                MonitorStateStore.saveEnrolledVoiceprint(
+                    allExtractedEmbeddings = collectedEmbeddings,
+                    stepCount = ENROLL_STEPS.size
+                )
                 showEnrollDialog = false
-                Toast.makeText(context, "专属声纹已激活！现在只有你的声音会触发提醒", Toast.LENGTH_LONG).show()
+                Toast.makeText(context, "多尺度声纹已校准完成！精准度大幅提升", Toast.LENGTH_LONG).show()
             }
         )
     }
@@ -299,7 +302,7 @@ private fun VoiceprintCard(
                                     when (res) {
                                         is VoiceCaptureResult.Success -> {
                                             testScore = VoiceprintManager.computeBestSimilarity(
-                                                liveEmbedding = res.embedding,
+                                                liveEmbedding = res.primaryEmbedding,
                                                 enrolledVectors = profile.enrolledVectors
                                             )
                                         }
@@ -420,9 +423,9 @@ private fun VoiceprintCard(
                     )
                     Text(
                         text = when {
-                            settings.voiceprintThreshold < 0.42f -> "宽松（防漏报）"
-                            settings.voiceprintThreshold > 0.56f -> "严格（强防误报）"
-                            else -> "均衡推荐"
+                            settings.voiceprintThreshold < 0.29f -> "宽松（高灵敏防漏报）"
+                            settings.voiceprintThreshold > 0.45f -> "严格（强防旁人误报）"
+                            else -> "黄金推荐 (32%~40%)"
                         },
                         fontSize = 12.sp,
                         color = palette.accentBlue
@@ -433,7 +436,7 @@ private fun VoiceprintCard(
                     onValueChange = { v ->
                         MonitorStateStore.updateSettings { it.copy(voiceprintThreshold = v) }
                     },
-                    valueRange = 0.30f..0.72f,
+                    valueRange = 0.20f..0.68f,
                     colors = SliderDefaults.colors(
                         thumbColor = palette.accentBlue,
                         activeTrackColor = palette.accentBlue
@@ -594,6 +597,7 @@ private fun VoiceprintEnrollWizardDialog(
                             val result = VoiceprintManager.captureVoiceClipForEmbedding(
                                 context = context,
                                 durationMs = 3500L,
+                                multiScale = true,
                                 onProgress = { p, rms ->
                                     progress = p
                                     liveRms = rms
@@ -602,7 +606,7 @@ private fun VoiceprintEnrollWizardDialog(
                             isRecording = false
                             when (result) {
                                 is VoiceCaptureResult.Success -> {
-                                    collected.add(result.embedding)
+                                    collected.addAll(result.embeddings)
                                     if (currentStepIndex < ENROLL_STEPS.lastIndex) {
                                         currentStepIndex++
                                         progress = 0f

@@ -272,7 +272,7 @@ private fun OriginTopHeader(uiState: MonitorUiState) {
                     backgroundColor = palette.accentBlue.copy(alpha = if (palette.isDark) 0.22f else 0.12f)
                 ) {
                     Text(
-                        text = "v2.0",
+                        text = "v2.1",
                         fontSize = 10.sp,
                         fontWeight = FontWeight.Bold,
                         color = palette.accentBlue

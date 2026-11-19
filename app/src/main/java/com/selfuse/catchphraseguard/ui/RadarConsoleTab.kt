@@ -37,6 +37,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import android.widget.Toast
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -44,11 +45,13 @@ import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.selfuse.catchphraseguard.HitRecord
+import com.selfuse.catchphraseguard.MonitorStateStore
 import com.selfuse.catchphraseguard.MonitorUiState
 import com.selfuse.catchphraseguard.PulseEventType
 import kotlinx.coroutines.delay
@@ -539,6 +542,7 @@ private fun ActivityTimelineSection(
 @Composable
 private fun TimelineEventRow(item: HitRecord) {
     val palette = LocalOriginPalette.current
+    val context = LocalContext.current
     val isSelf = item.isSelfVoice
     val accent = if (isSelf) palette.alertCoral else palette.shieldEmerald
     val badgeBg = if (isSelf) palette.alertContainer else palette.shieldContainer
@@ -577,7 +581,9 @@ private fun TimelineEventRow(item: HitRecord) {
                         val badgeLabel = buildString {
                             if (isSelf) {
                                 append("第${item.todayCountAfterHit}次")
-                                if (item.similarity != null) {
+                                if (item.calibratedManually) {
+                                    append(" · 已学习")
+                                } else if (item.similarity != null) {
                                     append(" · ${(item.similarity * 100).roundToInt()}%")
                                 }
                             } else {
@@ -605,6 +611,29 @@ private fun TimelineEventRow(item: HitRecord) {
                     fontSize = 12.sp,
                     color = palette.textSecondary
                 )
+            }
+            if (!isSelf && item.transientEmbedding != null) {
+                Spacer(modifier = Modifier.height(6.dp))
+                OriginPillBadge(
+                    backgroundColor = palette.accentBlue.copy(alpha = if (palette.isDark) 0.22f else 0.12f),
+                    modifier = Modifier.clickable {
+                        val ok = MonitorStateStore.learnSelfFromFilteredHit(item.id)
+                        if (ok) {
+                            Toast.makeText(
+                                context,
+                                "已将这段原声加入你的声纹库，相同语气下次必中！",
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        }
+                    }
+                ) {
+                    Text(
+                        text = "其实是我说的 · 点此一键校准学习",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = palette.accentBlue
+                    )
+                }
             }
         }
     }

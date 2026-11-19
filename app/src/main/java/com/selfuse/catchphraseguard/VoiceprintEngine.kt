@@ -19,7 +19,12 @@ import kotlinx.coroutines.withContext
 import kotlin.math.sqrt
 
 sealed class VoiceCaptureResult {
-    data class Success(val embedding: FloatArray, val activeDurationSec: Float) : VoiceCaptureResult()
+    data class Success(
+        val embeddings: List<FloatArray>,
+        val primaryEmbedding: FloatArray,
+        val activeDurationSec: Float
+    ) : VoiceCaptureResult()
+
     data object TooQuiet : VoiceCaptureResult()
     data class Error(val message: String) : VoiceCaptureResult()
 }
@@ -27,6 +32,7 @@ sealed class VoiceCaptureResult {
 object VoiceprintManager {
     private const val TAG = "VoiceprintManager"
     const val SAMPLE_RATE = 16000
+    private const val TARGET_RMS = 0.085f
 
     private val lock = Any()
     private var extractor: SpeakerEmbeddingExtractor? = null
@@ -54,14 +60,70 @@ object VoiceprintManager {
         }
     }
 
-    fun extractEmbedding(context: Context, samples: FloatArray, sampleRate: Int = SAMPLE_RATE): FloatArray? {
-        if (samples.size < sampleRate / 3) return null
+    fun createCleanAudioRecord(bufferSizeInBytes: Int): AudioRecord {
+        val vrRecord = AudioRecord(
+            MediaRecorder.AudioSource.VOICE_RECOGNITION,
+            SAMPLE_RATE,
+            AudioFormat.CHANNEL_IN_MONO,
+            AudioFormat.ENCODING_PCM_16BIT,
+            bufferSizeInBytes
+        )
+        if (vrRecord.state == AudioRecord.STATE_INITIALIZED) {
+            return vrRecord
+        }
+        try {
+            vrRecord.release()
+        } catch (_: Exception) {
+        }
+        return AudioRecord(
+            MediaRecorder.AudioSource.MIC,
+            SAMPLE_RATE,
+            AudioFormat.CHANNEL_IN_MONO,
+            AudioFormat.ENCODING_PCM_16BIT,
+            bufferSizeInBytes
+        )
+    }
+
+    /**
+     * Removes DC offset and normalizes speech loudness to a consistent RMS target
+     * without chopping internal unvoiced consonants or pauses.
+     */
+    fun normalizeSpeechWaveform(samples: FloatArray): FloatArray {
+        if (samples.isEmpty()) return samples
+        var sum = 0.0
+        for (s in samples) {
+            sum += s
+        }
+        val mean = (sum / samples.size).toFloat()
+
+        var sumSq = 0.0
+        for (s in samples) {
+            val centered = s - mean
+            sumSq += centered * centered
+        }
+        val rms = sqrt(sumSq / samples.size).toFloat()
+        if (rms < 1e-5f) return samples
+
+        val gain = (TARGET_RMS / rms).coerceIn(0.6f, 6.5f)
+        return FloatArray(samples.size) { i ->
+            val v = (samples[i] - mean) * gain
+            v.coerceIn(-0.96f, 0.96f)
+        }
+    }
+
+    fun extractEmbedding(
+        context: Context,
+        rawSamples: FloatArray,
+        sampleRate: Int = SAMPLE_RATE
+    ): FloatArray? {
+        if (rawSamples.size < (sampleRate * 0.35f).toInt()) return null
+        val prepared = normalizeSpeechWaveform(rawSamples)
         return try {
             synchronized(lock) {
                 val ext = getOrCreateExtractor(context)
                 val stream = ext.createStream()
                 try {
-                    stream.acceptWaveform(samples, sampleRate)
+                    stream.acceptWaveform(prepared, sampleRate)
                     stream.inputFinished()
                     if (!ext.isReady(stream)) return null
                     val raw = ext.compute(stream)
@@ -76,20 +138,46 @@ object VoiceprintManager {
         }
     }
 
+    /**
+     * Extracts both full-utterance embedding and short (~1.1s) sub-window embeddings
+     * so short catchphrases ("没有", "不是") match temporal pooling statistics accurately.
+     */
+    fun extractMultiScaleEmbeddings(context: Context, trimmedSpeech: FloatArray): List<FloatArray> {
+        val results = ArrayList<FloatArray>(3)
+        extractEmbedding(context, trimmedSpeech, SAMPLE_RATE)?.let { results.add(it) }
+
+        val subWindowSamples = (SAMPLE_RATE * 1.15f).toInt() // ~1.15s
+        if (trimmedSpeech.size >= (SAMPLE_RATE * 1.65f).toInt()) {
+            val headSlice = trimmedSpeech.copyOfRange(0, subWindowSamples)
+            extractEmbedding(context, headSlice, SAMPLE_RATE)?.let { results.add(it) }
+
+            val tailStart = (trimmedSpeech.size - subWindowSamples).coerceAtLeast(0)
+            val tailSlice = trimmedSpeech.copyOfRange(tailStart, trimmedSpeech.size)
+            extractEmbedding(context, tailSlice, SAMPLE_RATE)?.let { results.add(it) }
+        }
+        return results
+    }
+
     fun computeBestSimilarity(liveEmbedding: FloatArray, enrolledVectors: List<FloatArray>): Float {
         if (enrolledVectors.isEmpty()) return 1.0f
         val normLive = l2Normalize(liveEmbedding)
-        var best = -1.0f
+        val matches = ArrayList<Float>(enrolledVectors.size)
         for (ref in enrolledVectors) {
             if (ref.size == normLive.size) {
                 var dot = 0f
                 for (i in normLive.indices) {
                     dot += normLive[i] * ref[i]
                 }
-                if (dot > best) best = dot
+                matches.add(dot)
             }
         }
-        return best.coerceIn(0f, 1f)
+        if (matches.isEmpty()) return 0f
+        matches.sortDescending()
+        // Blend top-1 and top-2 match slightly when multiple sub-windows exist for stability
+        val best = matches[0]
+        val second = if (matches.size > 1) matches[1] else best
+        val score = 0.75f * best + 0.25f * second
+        return score.coerceIn(0f, 1f)
     }
 
     fun buildEnrolledReferenceSet(stepEmbeddings: List<FloatArray>): List<FloatArray> {
@@ -128,6 +216,7 @@ object VoiceprintManager {
     suspend fun captureVoiceClipForEmbedding(
         context: Context,
         durationMs: Long,
+        multiScale: Boolean = false,
         onProgress: (progress: Float, rmsLevel: Float) -> Unit
     ): VoiceCaptureResult = withContext(Dispatchers.IO) {
         val appContext = context.applicationContext
@@ -146,7 +235,7 @@ object VoiceprintManager {
             }
             appContext.startService(pauseIntent)
             var waited = 0
-            while (!MonitorStateStore.uiState.value.isMicPausedForEnroll && waited < 15) {
+            while (!MonitorStateStore.uiState.value.isMicPausedForEnroll && waited < 18) {
                 delay(50)
                 waited++
             }
@@ -162,21 +251,17 @@ object VoiceprintManager {
                 AudioFormat.ENCODING_PCM_16BIT
             )
             val bufferBytes = maxOf(minBuf, chunkSamples * 2) * 2
-            audioRecord = AudioRecord(
-                MediaRecorder.AudioSource.MIC,
-                SAMPLE_RATE,
-                AudioFormat.CHANNEL_IN_MONO,
-                AudioFormat.ENCODING_PCM_16BIT,
-                bufferBytes
-            )
+            audioRecord = createCleanAudioRecord(bufferBytes)
             if (audioRecord.state != AudioRecord.STATE_INITIALIZED) {
                 return@withContext VoiceCaptureResult.Error("麦克风繁忙，请稍后重试")
             }
 
             audioRecord.startRecording()
             val shortBuf = ShortArray(chunkSamples)
-            val activeChunks = ArrayList<FloatArray>()
-            var activeSampleCount = 0
+            val allChunks = ArrayList<FloatArray>()
+            val chunkRmsList = ArrayList<Float>()
+            var voicedChunkCount = 0
+            val voiceGate = 0.0065f
             val startMs = SystemClock.elapsedRealtime()
 
             while (isActive) {
@@ -185,7 +270,7 @@ object VoiceprintManager {
 
                 val read = audioRecord.read(shortBuf, 0, shortBuf.size)
                 if (read <= 0) {
-                    delay(30)
+                    delay(25)
                     continue
                 }
 
@@ -200,29 +285,52 @@ object VoiceprintManager {
                 val progress = ((SystemClock.elapsedRealtime() - startMs).toFloat() / durationMs).coerceIn(0f, 1f)
                 onProgress(progress, rms)
 
-                if (rms >= 0.009f) {
-                    activeChunks.add(chunk)
-                    activeSampleCount += read
+                allChunks.add(chunk)
+                chunkRmsList.add(rms)
+                if (rms >= voiceGate) {
+                    voicedChunkCount++
                 }
             }
             onProgress(1f, 0f)
 
-            val activeSec = activeSampleCount.toFloat() / SAMPLE_RATE
-            if (activeSampleCount < (SAMPLE_RATE * 0.7f).toInt()) {
+            val activeSec = (voicedChunkCount * chunkSamples).toFloat() / SAMPLE_RATE
+            if (activeSec < 0.55f || allChunks.isEmpty()) {
                 return@withContext VoiceCaptureResult.TooQuiet
             }
 
-            val merged = FloatArray(activeSampleCount)
+            // Trim ONLY leading and trailing silence, keeping natural continuous waveform intact!
+            val firstVoiced = chunkRmsList.indexOfFirst { it >= voiceGate }.coerceAtLeast(0)
+            val lastVoiced = chunkRmsList.indexOfLast { it >= voiceGate }.coerceAtLeast(firstVoiced)
+            val startIdx = (firstVoiced - 1).coerceAtLeast(0)
+            val endIdx = (lastVoiced + 1).coerceAtMost(allChunks.lastIndex)
+
+            var totalSamples = 0
+            for (i in startIdx..endIdx) {
+                totalSamples += allChunks[i].size
+            }
+            val continuousSpeech = FloatArray(totalSamples)
             var offset = 0
-            for (c in activeChunks) {
-                System.arraycopy(c, 0, merged, offset, c.size)
-                offset += c.size
+            for (i in startIdx..endIdx) {
+                val arr = allChunks[i]
+                System.arraycopy(arr, 0, continuousSpeech, offset, arr.size)
+                offset += arr.size
             }
 
-            val embedding = extractEmbedding(appContext, merged, SAMPLE_RATE)
-                ?: return@withContext VoiceCaptureResult.Error("声纹特征提取失败，请重试")
+            val embeddings = if (multiScale) {
+                extractMultiScaleEmbeddings(appContext, continuousSpeech)
+            } else {
+                extractEmbedding(appContext, continuousSpeech, SAMPLE_RATE)?.let { listOf(it) } ?: emptyList()
+            }
 
-            VoiceCaptureResult.Success(embedding = embedding, activeDurationSec = activeSec)
+            if (embeddings.isEmpty()) {
+                return@withContext VoiceCaptureResult.Error("声纹特征提取失败，请再试一次")
+            }
+
+            VoiceCaptureResult.Success(
+                embeddings = embeddings,
+                primaryEmbedding = embeddings.first(),
+                activeDurationSec = activeSec
+            )
         } catch (e: Exception) {
             Log.e(TAG, "Error capturing voice clip", e)
             VoiceCaptureResult.Error("录音异常：${e.localizedMessage ?: "未知错误"}")
@@ -245,9 +353,14 @@ object VoiceprintManager {
     }
 }
 
+/**
+ * Stores recent continuous 100ms audio frames and isolates ONLY the current speaker turn
+ * (stopping at any >=400ms silence gap so a previous speaker's voice never contaminates the embedding,
+ * while keeping internal consonants and micro-pauses 100% continuous!).
+ */
 class RollingVoiceBuffer(
-    private val maxChunks: Int = 26, // ~2.6 seconds of 100ms chunks
-    private val voiceRmsFloor: Float = 0.0085f
+    private val maxChunks: Int = 30, // 3.0 seconds of 100ms chunks
+    private val voiceRmsFloor: Float = 0.0065f
 ) {
     private data class AudioFrame(val samples: FloatArray, val rms: Float)
 
@@ -267,47 +380,68 @@ class RollingVoiceBuffer(
     }
 
     @Synchronized
-    fun activeVoiceDurationSec(): Float {
-        var totalSamples = 0
-        for (f in frames) {
-            if (f.rms >= voiceRmsFloor) {
-                totalSamples += f.samples.size
-            }
-        }
-        return totalSamples.toFloat() / VoiceprintManager.SAMPLE_RATE
+    fun latestFrameIsVoiced(): Boolean {
+        val last = frames.lastOrNull() ?: return false
+        return last.rms >= voiceRmsFloor
     }
 
     @Synchronized
-    fun extractRecentActiveVoice(maxSamples: Int = 32000): FloatArray {
-        if (frames.isEmpty()) return FloatArray(0)
+    fun currentTurnDurationSec(): Float {
+        val span = findCurrentTurnSpan() ?: return 0f
+        var samples = 0
         val list = frames.toList()
-        val keep = BooleanArray(list.size)
-        for (i in list.indices) {
-            if (list[i].rms >= voiceRmsFloor) {
-                keep[i] = true
-                if (i > 0) keep[i - 1] = true
-                if (i + 1 < list.size) keep[i + 1] = true
+        for (i in span.first..span.second) {
+            samples += list[i].samples.size
+        }
+        return samples.toFloat() / VoiceprintManager.SAMPLE_RATE
+    }
+
+    @Synchronized
+    fun extractCurrentTurnSpeech(maxSamples: Int = 24000): FloatArray {
+        val list = frames.toList()
+        val span = findCurrentTurnSpan(list) ?: return FloatArray(0)
+
+        val endIdx = (span.second + 1).coerceAtMost(list.lastIndex)
+        var startIdx = (span.first - 1).coerceAtLeast(0)
+
+        var total = 0
+        for (i in endIdx downTo startIdx) {
+            total += list[i].samples.size
+            if (total >= maxSamples) {
+                startIdx = i
+                break
             }
         }
 
-        val selected = ArrayList<FloatArray>()
-        var collected = 0
-        for (i in list.indices.reversed()) {
-            if (keep[i]) {
-                selected.add(list[i].samples)
-                collected += list[i].samples.size
-                if (collected >= maxSamples) break
-            }
-        }
-        if (collected == 0) return FloatArray(0)
-
-        selected.reverse()
-        val result = FloatArray(collected)
+        val result = FloatArray(total)
         var pos = 0
-        for (arr in selected) {
+        for (i in startIdx..endIdx) {
+            val arr = list[i].samples
             System.arraycopy(arr, 0, result, pos, arr.size)
             pos += arr.size
         }
         return result
+    }
+
+    private fun findCurrentTurnSpan(list: List<AudioFrame> = frames.toList()): Pair<Int, Int>? {
+        if (list.isEmpty()) return null
+        val lastVoiced = list.indexOfLast { it.rms >= voiceRmsFloor }
+        if (lastVoiced < 0) return null
+
+        var turnStart = lastVoiced
+        var consecutiveSilence = 0
+        for (i in lastVoiced downTo 0) {
+            if (list[i].rms >= voiceRmsFloor) {
+                turnStart = i
+                consecutiveSilence = 0
+            } else {
+                consecutiveSilence++
+                // >= 4 consecutive 100ms silent chunks (400ms pause) = speaker turn boundary!
+                if (consecutiveSilence >= 4) {
+                    break
+                }
+            }
+        }
+        return turnStart to lastVoiced
     }
 }

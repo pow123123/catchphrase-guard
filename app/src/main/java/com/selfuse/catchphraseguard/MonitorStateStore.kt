@@ -27,7 +27,9 @@ data class HitRecord(
     val snippet: String,
     val todayCountAfterHit: Int,
     val isSelfVoice: Boolean = true,
-    val similarity: Float? = null
+    val similarity: Float? = null,
+    val calibratedManually: Boolean = false,
+    val transientEmbedding: FloatArray? = null
 )
 
 data class MonitorSettings(
@@ -37,7 +39,7 @@ data class MonitorSettings(
     val micBoost: Boolean = false,
     val nearVoiceFilter: Boolean = false,
     val voiceprintEnabled: Boolean = true,
-    val voiceprintThreshold: Float = 0.48f
+    val voiceprintThreshold: Float = 0.35f
 )
 
 data class VoiceprintProfile(
@@ -79,6 +81,7 @@ object MonitorStateStore {
     private const val KEY_VOICEPRINT = "voiceprint_json"
     private const val KEY_STAT_DATE = "stat_date"
     private const val KEY_FILTERED_TODAY = "filtered_others_today"
+    private const val KEY_CALIBRATED_V21 = "threshold_migrated_v21"
 
     private val timeFormatter = DateTimeFormatter.ofPattern("HH:mm:ss")
     private val dateTimeFormatter = DateTimeFormatter.ofPattern("MM-dd HH:mm")
@@ -111,7 +114,15 @@ object MonitorStateStore {
         prefs.edit().putString(KEY_STAT_DATE, today).apply()
 
         val hits = loadHits()
-        val settings = loadSettings()
+        var settings = loadSettings()
+        if (!prefs.getBoolean(KEY_CALIBRATED_V21, false)) {
+            if (settings.voiceprintThreshold >= 0.45f) {
+                settings = settings.copy(voiceprintThreshold = 0.35f)
+                saveSettings(settings)
+            }
+            prefs.edit().putBoolean(KEY_CALIBRATED_V21, true).apply()
+        }
+
         val vpProfile = loadVoiceprintProfile()
 
         _uiState.update { current ->
@@ -163,7 +174,7 @@ object MonitorStateStore {
         _uiState.update {
             it.copy(
                 isMicPausedForEnroll = paused,
-                statusMessage = if (paused) "声纹采集中（后台监听已暂时让位）" else "正在后台静默监听中",
+                statusMessage = if (paused) "声纹采集中（后台监听已暂时让位）" else "正在后台静默守护中",
                 micLevel = if (paused) 0f else it.micLevel
             )
         }
@@ -179,11 +190,11 @@ object MonitorStateStore {
     }
 
     @Synchronized
-    fun saveEnrolledVoiceprint(stepEmbeddings: List<FloatArray>) {
-        val referenceSet = VoiceprintManager.buildEnrolledReferenceSet(stepEmbeddings)
+    fun saveEnrolledVoiceprint(allExtractedEmbeddings: List<FloatArray>, stepCount: Int = 3) {
+        val referenceSet = VoiceprintManager.buildEnrolledReferenceSet(allExtractedEmbeddings)
         val profile = VoiceprintProfile(
             enrolledVectors = referenceSet,
-            sampleCount = stepEmbeddings.size,
+            sampleCount = stepCount,
             updatedAtText = LocalDateTime.now().format(dateTimeFormatter)
         )
         persistVoiceprintProfile(profile)
@@ -195,6 +206,60 @@ object MonitorStateStore {
                 settings = updatedSettings
             )
         }
+    }
+
+    @Synchronized
+    fun learnSelfFromFilteredHit(hitId: Long): Boolean {
+        val state = _uiState.value
+        val target = state.recentHits.firstOrNull { it.id == hitId && !it.isSelfVoice } ?: return false
+        val emb = target.transientEmbedding ?: return false
+
+        val normEmb = VoiceprintManager.l2Normalize(emb)
+        val mergedVectors = (state.voiceprintProfile.enrolledVectors + listOf(normEmb)).takeLast(18)
+        val updatedProfile = state.voiceprintProfile.copy(
+            enrolledVectors = mergedVectors,
+            sampleCount = (state.voiceprintProfile.sampleCount + 1).coerceAtLeast(1),
+            updatedAtText = LocalDateTime.now().format(dateTimeFormatter)
+        )
+        persistVoiceprintProfile(updatedProfile)
+
+        var newWordTodayCount = 1
+        val updatedKeywords = state.keywords.map { kw ->
+            if (kw.word == target.word) {
+                newWordTodayCount = kw.todayCount + 1
+                kw.copy(todayCount = newWordTodayCount, totalCount = kw.totalCount + 1)
+            } else {
+                kw
+            }
+        }
+        val newFilteredCount = (state.todayFilteredOthersCount - 1).coerceAtLeast(0)
+        prefs.edit().putInt(KEY_FILTERED_TODAY, newFilteredCount).apply()
+
+        val updatedHits = state.recentHits.map { item ->
+            if (item.id == hitId) {
+                item.copy(
+                    isSelfVoice = true,
+                    todayCountAfterHit = newWordTodayCount,
+                    calibratedManually = true,
+                    transientEmbedding = null
+                )
+            } else {
+                item
+            }
+        }
+        saveKeywords(updatedKeywords)
+        saveHits(updatedHits)
+
+        _uiState.update {
+            it.copy(
+                voiceprintProfile = updatedProfile,
+                keywords = updatedKeywords,
+                recentHits = updatedHits,
+                todayFilteredOthersCount = newFilteredCount,
+                lastSimilarityWasSelf = true
+            )
+        }
+        return true
     }
 
     @Synchronized
@@ -303,7 +368,12 @@ object MonitorStateStore {
     }
 
     @Synchronized
-    fun recordFilteredOtherVoice(word: String, fullUtterance: String, similarity: Float): HitRecord {
+    fun recordFilteredOtherVoice(
+        word: String,
+        fullUtterance: String,
+        similarity: Float,
+        liveEmbedding: FloatArray? = null
+    ): HitRecord {
         rollOverDateIfNeeded()
         val currentWordCount = _uiState.value.keywords.firstOrNull { it.word == word }?.todayCount ?: 0
         val newFilteredCount = _uiState.value.todayFilteredOthersCount + 1
@@ -318,7 +388,8 @@ object MonitorStateStore {
             snippet = snippet,
             todayCountAfterHit = currentWordCount,
             isSelfVoice = false,
-            similarity = similarity
+            similarity = similarity,
+            transientEmbedding = liveEmbedding
         )
         val updatedHits = (listOf(record) + _uiState.value.recentHits).take(50)
         saveHits(updatedHits)
@@ -410,7 +481,8 @@ object MonitorStateStore {
                             snippet = obj.optString("snippet", ""),
                             todayCountAfterHit = obj.optInt("todayCountAfterHit", 0),
                             isSelfVoice = obj.optBoolean("isSelfVoice", true),
-                            similarity = if (hasSim) obj.optDouble("similarity", 0.0).toFloat() else null
+                            similarity = if (hasSim) obj.optDouble("similarity", 0.0).toFloat() else null,
+                            calibratedManually = obj.optBoolean("calibratedManually", false)
                         )
                     )
                 }
@@ -431,6 +503,7 @@ object MonitorStateStore {
                     put("snippet", item.snippet)
                     put("todayCountAfterHit", item.todayCountAfterHit)
                     put("isSelfVoice", item.isSelfVoice)
+                    put("calibratedManually", item.calibratedManually)
                     if (item.similarity != null) {
                         put("similarity", item.similarity.toDouble())
                     }
@@ -451,7 +524,7 @@ object MonitorStateStore {
                 micBoost = obj.optBoolean("micBoost", false),
                 nearVoiceFilter = obj.optBoolean("nearVoiceFilter", false),
                 voiceprintEnabled = obj.optBoolean("voiceprintEnabled", true),
-                voiceprintThreshold = obj.optDouble("voiceprintThreshold", 0.48).toFloat().coerceIn(0.30f, 0.75f)
+                voiceprintThreshold = obj.optDouble("voiceprintThreshold", 0.35).toFloat().coerceIn(0.20f, 0.68f)
             )
         } catch (_: Exception) {
             MonitorSettings()

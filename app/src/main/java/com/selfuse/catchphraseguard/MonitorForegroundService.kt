@@ -8,7 +8,6 @@ import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.media.AudioFormat
 import android.media.AudioRecord
-import android.media.MediaRecorder
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
@@ -173,6 +172,8 @@ class MonitorForegroundService : Service() {
                 val recognizerConfig = OnlineRecognizerConfig().apply {
                     this.modelConfig = modelConfig
                     enableEndpoint = true
+                    decodingMethod = "modified_beam_search"
+                    maxActivePaths = 4
                 }
 
                 recognizer = OnlineRecognizer(applicationContext.assets, recognizerConfig)
@@ -187,13 +188,7 @@ class MonitorForegroundService : Service() {
                     )
                     val bufferSizeInBytes = maxOf(minBufBytes, CHUNK_SAMPLES * 2) * 2
 
-                    audioRecord = AudioRecord(
-                        MediaRecorder.AudioSource.MIC,
-                        SAMPLE_RATE,
-                        AudioFormat.CHANNEL_IN_MONO,
-                        AudioFormat.ENCODING_PCM_16BIT,
-                        bufferSizeInBytes
-                    )
+                    audioRecord = VoiceprintManager.createCleanAudioRecord(bufferSizeInBytes)
 
                     if (audioRecord.state != AudioRecord.STATE_INITIALIZED) {
                         MonitorStateStore.setRunningState(false, "麦克风初始化失败，可能被其他应用占用")
@@ -240,7 +235,7 @@ class MonitorForegroundService : Service() {
 
                         rollingVoiceBuffer.append(rawSamples, rawRms)
 
-                        val feedSamples = if (settings.nearVoiceFilter && uiRms < 0.015f) {
+                        val feedSamples = if (settings.nearVoiceFilter && uiRms < 0.014f) {
                             if (readCount == zeroSamples.size) zeroSamples else FloatArray(readCount)
                         } else {
                             boostedSamples
@@ -353,9 +348,12 @@ class MonitorForegroundService : Service() {
                         similarity = null
                     )
                 } else {
-                    // Micro-extension (up to 200ms) if active voice is very brief (<0.65s)
+                    // Capture up to 300ms continuation if user is still speaking a short phrase (<0.9s)
                     var extraReads = 0
-                    while (rollingVoiceBuffer.activeVoiceDurationSec() < 0.65f && extraReads < 2) {
+                    while (rollingVoiceBuffer.currentTurnDurationSec() < 0.90f &&
+                        rollingVoiceBuffer.latestFrameIsVoiced() &&
+                        extraReads < 3
+                    ) {
                         val extraCount = audioRecord.read(shortBuffer, 0, shortBuffer.size)
                         if (extraCount <= 0) break
                         var sumSq = 0.0
@@ -377,17 +375,18 @@ class MonitorForegroundService : Service() {
                         extraReads++
                     }
 
-                    val recentVoice = rollingVoiceBuffer.extractRecentActiveVoice(SAMPLE_RATE * 2)
+                    val turnSpeech = rollingVoiceBuffer.extractCurrentTurnSpeech(
+                        maxSamples = (SAMPLE_RATE * 1.6f).toInt()
+                    )
                     val liveEmb = VoiceprintManager.extractEmbedding(
                         context = applicationContext,
-                        samples = recentVoice,
+                        rawSamples = turnSpeech,
                         sampleRate = SAMPLE_RATE
                     )
                     val updatedText = recognizer.getResult(stream).text.trim().ifEmpty { currentText }
 
                     if (liveEmb == null) {
-                        // Too brief/quiet to form a reliable voiceprint -> treat cautiously as non-trigger
-                        MonitorStateStore.recordFilteredOtherVoice(kw, updatedText, 0.15f)
+                        MonitorStateStore.recordFilteredOtherVoice(kw, updatedText, 0.12f, null)
                     } else {
                         val similarity = VoiceprintManager.computeBestSimilarity(
                             liveEmbedding = liveEmb,
@@ -406,9 +405,13 @@ class MonitorForegroundService : Service() {
                                 similarity = similarity
                             )
                         } else {
-                            // Filtered someone else's voice! Apply a brief 1.5s dedup cooldown
                             lastAlertRealtimeMs[kw] = SystemClock.elapsedRealtime() - (cooldownMs - 1500L).coerceAtLeast(0L)
-                            MonitorStateStore.recordFilteredOtherVoice(kw, updatedText, similarity)
+                            MonitorStateStore.recordFilteredOtherVoice(
+                                word = kw,
+                                fullUtterance = updatedText,
+                                similarity = similarity,
+                                liveEmbedding = liveEmb
+                            )
                         }
                     }
                 }

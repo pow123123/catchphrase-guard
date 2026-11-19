@@ -65,26 +65,28 @@ jobs:
       - name: Build signed Release APK
         run: |
           gradle assembleRelease --no-daemon --stacktrace
-          cp app/build/outputs/apk/release/app-release.apk "CatchphraseGuard-v2.0.${GITHUB_RUN_NUMBER}.apk"
-          ls -lh "CatchphraseGuard-v2.0.${GITHUB_RUN_NUMBER}.apk"
+          cp app/build/outputs/apk/release/app-release.apk "CatchphraseGuard-v2.1.${GITHUB_RUN_NUMBER}.apk"
+          ls -lh "CatchphraseGuard-v2.1.${GITHUB_RUN_NUMBER}.apk"
 
       - name: Upload APK to Actions Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: CatchphraseGuard-APK
-          path: CatchphraseGuard-v2.0.${{ github.run_number }}.apk
+          path: CatchphraseGuard-v2.1.${{ github.run_number }}.apk
           if-no-files-found: error
 
       - name: Publish APK to GitHub Releases (1-click mobile download)
         continue-on-error: true
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v2.0.${{ github.run_number }}
-          name: "口头禅猎手 v2.0.${{ github.run_number }}（OriginOS 焕新版 + 本人声纹过滤）"
+          tag_name: v2.1.${{ github.run_number }}
+          name: "口头禅猎手 v2.1.${{ github.run_number }}（声纹高精准度调优版）"
           body: |
-            ### v2.0 更新亮点
-            - **本人声纹专属过滤**：内置 3D-Speaker CAMP++ 本地中文声纹模型，三步录入个人声纹后，只有你自己的声音才会触发推送提醒，他人说话自动静默拦截并标记相似度。
-            - **OriginOS 原生质感交互升级**：全新底部三栏分页（监听主控台 / 声纹与词库 / 统计与设置）、动态声波呼吸环、实时声纹试音沙盒，支持深浅色自动切换。
-            - **支持直接覆盖升级**：点击下方 `CatchphraseGuard-v2.0.${{ github.run_number }}.apk` 直接安装即可无缝覆盖旧版本。
-          files: CatchphraseGuard-v2.0.${{ github.run_number }}.apk
+            ### v2.1 声纹精准度深度调优
+            - **消除帧拼接断裂**：改为保留连续不断裂的自然发音波形（仅裁剪首尾空白），完整保留「不是 / 没有」中的清辅音与连读声学特征。
+            - **切换纯净线性音源 (`VOICE_RECOGNITION`) + 自动响度归一化**：绕过手机底层非线性降噪失真，远近说话能量统一。
+            - **多尺度短窗声纹库 + 对话停顿隔离**：录入时同步提取 1.1s 短语子特征匹配短促口头禅统计分布，并在 400ms 停顿处隔离对话轮次，避免与对方前一句话混音。
+            - **动态流一键校准学习**：如果某次低声嘟囔被误拦，点击动态里的「其实是我说的 · 点此一键校准学习」即可将该语气加入声纹库，越用越准！
+            - **注意**：升级安装后，请先去「声纹与词库」点一次 **「重新校准我的声纹」** 以用全新的纯净音源生成多尺度声纹库。
+          files: CatchphraseGuard-v2.1.${{ github.run_number }}.apk
           make_latest: true
