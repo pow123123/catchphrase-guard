@@ -30,13 +30,13 @@ jobs:
         with:
           gradle-version: "8.10.2"
 
-      - name: Cache sherpa-onnx AAR and Chinese ASR model
+      - name: Cache sherpa-onnx AAR, ASR model and CAMP++ voiceprint model
         uses: actions/cache@v4
         with:
           path: |
             app/libs
             app/src/main/assets/model
-          key: sherpa-onnx-zh-14m-deps-v1
+          key: sherpa-onnx-zh-14m-campplus-v2
 
       - name: Cache persistent APK signing keystore
         uses: actions/cache@v4
@@ -57,7 +57,7 @@ jobs:
               -dname "CN=CatchphraseGuard, OU=Personal, O=SelfUse, L=CN, ST=CN, C=CN"
           fi
 
-      - name: Download sherpa-onnx AAR & offline Chinese model
+      - name: Download sherpa-onnx AAR & offline Chinese ASR + Voiceprint models
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bash scripts/prepare_dependencies.sh
@@ -65,27 +65,26 @@ jobs:
       - name: Build signed Release APK
         run: |
           gradle assembleRelease --no-daemon --stacktrace
-          cp app/build/outputs/apk/release/app-release.apk "CatchphraseGuard-v1.0.${GITHUB_RUN_NUMBER}.apk"
-          ls -lh "CatchphraseGuard-v1.0.${GITHUB_RUN_NUMBER}.apk"
+          cp app/build/outputs/apk/release/app-release.apk "CatchphraseGuard-v2.0.${GITHUB_RUN_NUMBER}.apk"
+          ls -lh "CatchphraseGuard-v2.0.${GITHUB_RUN_NUMBER}.apk"
 
       - name: Upload APK to Actions Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: CatchphraseGuard-APK
-          path: CatchphraseGuard-v1.0.${{ github.run_number }}.apk
+          path: CatchphraseGuard-v2.0.${{ github.run_number }}.apk
           if-no-files-found: error
 
       - name: Publish APK to GitHub Releases (1-click mobile download)
         continue-on-error: true
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.0.${{ github.run_number }}
-          name: "口头禅猎手 v1.0.${{ github.run_number }}"
+          tag_name: v2.0.${{ github.run_number }}
+          name: "口头禅猎手 v2.0.${{ github.run_number }}（OriginOS 焕新版 + 本人声纹过滤）"
           body: |
-            ### 手机端一键下载安装说明（vivo X500 Pro / Android 17）
-            1. 直接点击下方 Assets 中的 **`CatchphraseGuard-v1.0.${{ github.run_number }}.apk`** 下载并安装。
-            2. 打开 App，默认已预置盯防口头禅：**「没有」**、**「不是」**（可在界面内随时增删其他词）。
-            3. 先点一次 **「发送一条测试推送消息」**，并在 **「通知设置」** 中打开【悬浮通知】和【锁屏通知】。
-            4. 点击 **「申请后台免杀」**，并在 vivo【设置 → 电池 → 后台耗电管理】中将本应用设为【允许后台高耗电】。
-          files: CatchphraseGuard-v1.0.${{ github.run_number }}.apk
+            ### v2.0 更新亮点
+            - **本人声纹专属过滤**：内置 3D-Speaker CAMP++ 本地中文声纹模型，三步录入个人声纹后，只有你自己的声音才会触发推送提醒，他人说话自动静默拦截并标记相似度。
+            - **OriginOS 原生质感交互升级**：全新底部三栏分页（监听主控台 / 声纹与词库 / 统计与设置）、动态声波呼吸环、实时声纹试音沙盒，支持深浅色自动切换。
+            - **支持直接覆盖升级**：点击下方 `CatchphraseGuard-v2.0.${{ github.run_number }}.apk` 直接安装即可无缝覆盖旧版本。
+          files: CatchphraseGuard-v2.0.${{ github.run_number }}.apk
           make_latest: true

@@ -7,14 +7,13 @@ MODEL_ASSET_DIR="${ROOT_DIR}/app/src/main/assets/model"
 
 mkdir -p "${LIBS_DIR}" "${MODEL_ASSET_DIR}"
 
-echo "=== [1/2] Preparing sherpa-onnx Android AAR ==="
+echo "=== [1/3] Preparing sherpa-onnx Android AAR ==="
 if [ -s "${LIBS_DIR}/sherpa-onnx.aar" ] && unzip -l "${LIBS_DIR}/sherpa-onnx.aar" | grep -q "libsherpa-onnx-jni.so"; then
   echo "Cached sherpa-onnx.aar is valid, skipping download."
 else
   rm -f "${LIBS_DIR}/sherpa-onnx.aar"
   AAR_URL=""
 
-  # 1) Try official k2-fsa/sherpa-onnx GitHub Releases first
   GH_HEADERS=(-H "Accept: application/vnd.github+json")
   if [ -n "${GITHUB_TOKEN:-}" ]; then
     GH_HEADERS+=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
@@ -27,7 +26,6 @@ else
     | jq -r '.assets[]? | select(.name | test("^sherpa-onnx-v?[0-9]+\\.[0-9]+\\.[0-9]+\\.aar$")) | .browser_download_url' \
     | head -n 1 || true)"
 
-  # 1b) Direct version lookup on Hugging Face if latest GitHub tag matches
   if { [ -z "${AAR_URL}" ] || [ "${AAR_URL}" = "null" ]; } && [ -n "${LATEST_VER}" ]; then
     CANDIDATE_HF="https://huggingface.co/csukuangfj/sherpa-onnx-libs/resolve/main/android/aar/sherpa-onnx-${LATEST_VER}.aar"
     if curl -fsSLI "${CANDIDATE_HF}" >/dev/null 2>&1; then
@@ -35,7 +33,6 @@ else
     fi
   fi
 
-  # 2) Fallback to csukuangfj/sherpa-onnx-libs on Hugging Face
   if [ -z "${AAR_URL}" ] || [ "${AAR_URL}" = "null" ]; then
     HF_PATH="$(curl -fsSL "https://huggingface.co/api/models/csukuangfj/sherpa-onnx-libs/tree/main/android/aar" \
       | jq -r '.[].path | select(test("^android/aar/sherpa-onnx-[0-9]+\\.[0-9]+\\.[0-9]+\\.aar$"))' \
@@ -45,7 +42,6 @@ else
     fi
   fi
 
-  # 3) Fallback to csukuangfj2/sherpa-onnx-libs mirror on Hugging Face
   if [ -z "${AAR_URL}" ] || [ "${AAR_URL}" = "null" ]; then
     HF2_PATH="$(curl -fsSL "https://huggingface.co/api/models/csukuangfj2/sherpa-onnx-libs/tree/main/android/aar" \
       | jq -r '.[].path | select(test("^android/aar/sherpa-onnx-[0-9]+\\.[0-9]+\\.[0-9]+\\.aar$"))' \
@@ -67,7 +63,7 @@ else
   echo "Verified sherpa-onnx.aar successfully."
 fi
 
-echo "=== [2/2] Preparing Chinese offline streaming ASR model ==="
+echo "=== [2/3] Preparing Chinese offline streaming ASR model ==="
 if [ -s "${MODEL_ASSET_DIR}/encoder.onnx" ] && \
    [ -s "${MODEL_ASSET_DIR}/decoder.onnx" ] && \
    [ -s "${MODEL_ASSET_DIR}/joiner.onnx" ] && \
@@ -91,5 +87,37 @@ else
   cp "${EXTRACTED_DIR}/tokens.txt" "${MODEL_ASSET_DIR}/tokens.txt"
 fi
 
+echo "=== [3/3] Preparing 3D-Speaker CAMP++ Chinese voiceprint model ==="
+SPEAKER_MODEL_PATH="${MODEL_ASSET_DIR}/speaker.onnx"
+if [ -s "${SPEAKER_MODEL_PATH}" ] && [ "$(wc -c < "${SPEAKER_MODEL_PATH}")" -gt 5000000 ]; then
+  echo "Cached speaker.onnx is valid, skipping download."
+else
+  rm -f "${SPEAKER_MODEL_PATH}"
+  SPEAKER_FILE="3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx"
+  SPEAKER_URLS=(
+    "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/${SPEAKER_FILE}"
+    "https://huggingface.co/csukuangfj/speaker-embedding-models/resolve/main/${SPEAKER_FILE}"
+    "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recognition-models/${SPEAKER_FILE}"
+  )
+
+  DOWNLOADED=0
+  for S_URL in "${SPEAKER_URLS[@]}"; do
+    echo "Trying speaker model URL: ${S_URL}"
+    if curl -fL --retry 2 --retry-delay 2 -o "${SPEAKER_MODEL_PATH}" "${S_URL}"; then
+      if [ -s "${SPEAKER_MODEL_PATH}" ] && [ "$(wc -c < "${SPEAKER_MODEL_PATH}")" -gt 5000000 ]; then
+        DOWNLOADED=1
+        echo "Downloaded speaker.onnx successfully from ${S_URL}"
+        break
+      fi
+    fi
+    rm -f "${SPEAKER_MODEL_PATH}"
+  done
+
+  if [ "${DOWNLOADED}" -ne 1 ]; then
+    echo "ERROR: Failed to download 3D-Speaker CAMP++ voiceprint model." >&2
+    exit 1
+  fi
+fi
+
 ls -lh "${LIBS_DIR}/sherpa-onnx.aar" "${MODEL_ASSET_DIR}/"
-echo "All dependencies ready!"
+echo "All ASR + Voiceprint dependencies ready!"

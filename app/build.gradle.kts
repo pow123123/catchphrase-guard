@@ -12,8 +12,8 @@ android {
         applicationId = "com.selfuse.catchphraseguard"
         minSdk = 26
         targetSdk = 35
-        versionCode = (System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 1)
-        versionName = "1.0.${System.getenv("GITHUB_RUN_NUMBER") ?: "1"}"
+        versionCode = 100 + (System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 1)
+        versionName = "2.0.${System.getenv("GITHUB_RUN_NUMBER") ?: "1"}"
 
         ndk {
             abiFilters += listOf("arm64-v8a")
@@ -88,6 +88,8 @@ dependencies {
     implementation(platform("androidx.compose:compose-bom:2024.10.01"))
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-graphics")
+    implementation("androidx.compose.animation:animation")
+    implementation("androidx.compose.material:material-icons-core")
     implementation("androidx.compose.material3:material3")
 
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")

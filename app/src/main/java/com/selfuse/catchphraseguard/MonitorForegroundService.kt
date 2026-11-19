@@ -19,12 +19,14 @@ import androidx.core.content.ContextCompat
 import com.k2fsa.sherpa.onnx.OnlineModelConfig
 import com.k2fsa.sherpa.onnx.OnlineRecognizer
 import com.k2fsa.sherpa.onnx.OnlineRecognizerConfig
+import com.k2fsa.sherpa.onnx.OnlineStream
 import com.k2fsa.sherpa.onnx.OnlineTransducerModelConfig
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -39,6 +41,8 @@ class MonitorForegroundService : Service() {
 
         const val ACTION_START = "com.selfuse.catchphraseguard.ACTION_START"
         const val ACTION_STOP = "com.selfuse.catchphraseguard.ACTION_STOP"
+        const val ACTION_PAUSE_FOR_ENROLL = "com.selfuse.catchphraseguard.ACTION_PAUSE_FOR_ENROLL"
+        const val ACTION_RESUME_AFTER_ENROLL = "com.selfuse.catchphraseguard.ACTION_RESUME_AFTER_ENROLL"
     }
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -55,9 +59,24 @@ class MonitorForegroundService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_STOP) {
-            stopMonitoringAndService()
-            return START_NOT_STICKY
+        when (intent?.action) {
+            ACTION_STOP -> {
+                stopMonitoringAndService()
+                return START_NOT_STICKY
+            }
+            ACTION_PAUSE_FOR_ENROLL -> {
+                serviceScope.launch {
+                    monitorJob?.cancelAndJoin()
+                    monitorJob = null
+                    MonitorStateStore.setMicPausedForEnroll(true)
+                }
+                return START_STICKY
+            }
+            ACTION_RESUME_AFTER_ENROLL -> {
+                MonitorStateStore.setMicPausedForEnroll(false)
+                startRecognitionLoopIfNeeded()
+                return START_STICKY
+            }
         }
 
         val hasMicPermission = ContextCompat.checkSelfPermission(
@@ -74,10 +93,12 @@ class MonitorForegroundService : Service() {
         val state = MonitorStateStore.uiState.value
         val activeWords = state.keywords.filter { it.enabled }.map { it.word }
         val todayTotal = state.keywords.sumOf { it.todayCount }
+        val vpProtected = state.settings.voiceprintEnabled && state.voiceprintProfile.isEnrolled
         val notification = NotificationHelper.buildOngoingNotification(
             context = this,
             activeKeywords = activeWords,
-            todayTotalCount = todayTotal
+            todayTotalCount = todayTotal,
+            voiceprintProtected = vpProtected
         )
 
         try {
@@ -113,10 +134,12 @@ class MonitorForegroundService : Service() {
                 if (state.isRunning) {
                     val activeWords = state.keywords.filter { it.enabled }.map { it.word }
                     val todayTotal = state.keywords.sumOf { it.todayCount }
+                    val vpProtected = state.settings.voiceprintEnabled && state.voiceprintProfile.isEnrolled
                     NotificationHelper.updateOngoingNotification(
                         context = this@MonitorForegroundService,
                         activeKeywords = activeWords,
-                        todayTotalCount = todayTotal
+                        todayTotalCount = todayTotal,
+                        voiceprintProtected = vpProtected
                     )
                 }
             }
@@ -126,11 +149,12 @@ class MonitorForegroundService : Service() {
     private fun startRecognitionLoopIfNeeded() {
         if (monitorJob?.isActive == true) return
 
-        MonitorStateStore.setRunningState(true, "正在加载本地离线语音模型…")
+        MonitorStateStore.setRunningState(true, "正在加载本地语音与声纹引擎…")
 
         monitorJob = serviceScope.launch(Dispatchers.IO) {
             var recognizer: OnlineRecognizer? = null
             var audioRecord: AudioRecord? = null
+            val rollingVoiceBuffer = RollingVoiceBuffer()
 
             try {
                 val transducer = OnlineTransducerModelConfig().apply {
@@ -152,6 +176,7 @@ class MonitorForegroundService : Service() {
                 }
 
                 recognizer = OnlineRecognizer(applicationContext.assets, recognizerConfig)
+                VoiceprintManager.warmUp(applicationContext)
                 val stream = recognizer.createStream()
 
                 try {
@@ -171,13 +196,13 @@ class MonitorForegroundService : Service() {
                     )
 
                     if (audioRecord.state != AudioRecord.STATE_INITIALIZED) {
-                        MonitorStateStore.setRunningState(false, "麦克风初始化失败，可能被其他应用独占")
+                        MonitorStateStore.setRunningState(false, "麦克风初始化失败，可能被其他应用占用")
                         stopSelf()
                         return@launch
                     }
 
                     audioRecord.startRecording()
-                    MonitorStateStore.setRunningState(true, "正在后台静默监听中（纯本地离线）")
+                    MonitorStateStore.setRunningState(true, "正在后台静默守护中")
 
                     val shortBuffer = ShortArray(CHUNK_SAMPLES)
                     val zeroSamples = FloatArray(CHUNK_SAMPLES)
@@ -189,7 +214,7 @@ class MonitorForegroundService : Service() {
                     while (isActive) {
                         val readCount = audioRecord.read(shortBuffer, 0, shortBuffer.size)
                         if (readCount <= 0) {
-                            delay(50)
+                            delay(40)
                             continue
                         }
 
@@ -197,19 +222,28 @@ class MonitorForegroundService : Service() {
                         val settings = currentState.settings
                         val gain = if (settings.micBoost) 2.2f else 1.0f
 
-                        var sumSquares = 0.0
-                        val floatSamples = FloatArray(readCount)
+                        var rawSumSq = 0.0
+                        var boostedSumSq = 0.0
+                        val rawSamples = FloatArray(readCount)
+                        val boostedSamples = FloatArray(readCount)
                         for (i in 0 until readCount) {
-                            val normalized = (shortBuffer[i] / 32768.0f * gain).coerceIn(-1.0f, 1.0f)
-                            floatSamples[i] = normalized
-                            sumSquares += normalized * normalized
-                        }
-                        val rms = sqrt(sumSquares / readCount).toFloat()
+                            val raw = (shortBuffer[i] / 32768.0f).coerceIn(-1.0f, 1.0f)
+                            rawSamples[i] = raw
+                            rawSumSq += raw * raw
 
-                        val feedSamples = if (settings.nearVoiceFilter && rms < 0.015f) {
+                            val boosted = (raw * gain).coerceIn(-1.0f, 1.0f)
+                            boostedSamples[i] = boosted
+                            boostedSumSq += boosted * boosted
+                        }
+                        val rawRms = sqrt(rawSumSq / readCount).toFloat()
+                        val uiRms = sqrt(boostedSumSq / readCount).toFloat()
+
+                        rollingVoiceBuffer.append(rawSamples, rawRms)
+
+                        val feedSamples = if (settings.nearVoiceFilter && uiRms < 0.015f) {
                             if (readCount == zeroSamples.size) zeroSamples else FloatArray(readCount)
                         } else {
-                            floatSamples
+                            boostedSamples
                         }
 
                         stream.acceptWaveform(feedSamples, SAMPLE_RATE)
@@ -222,19 +256,22 @@ class MonitorForegroundService : Service() {
                         if (rawText.isNotEmpty()) {
                             if (rawText != lastRecognizedText) {
                                 lastRecognizedText = rawText
-                                MonitorStateStore.updateLivePreview(rawText, rms)
-                            } else {
-                                MonitorStateStore.updateLivePreview(lastRecognizedText, rms)
                             }
+                            MonitorStateStore.updateLivePreview(lastRecognizedText, uiRms)
+
                             checkAndTriggerKeywords(
                                 currentText = rawText,
-                                activeKeywords = currentState.keywords.filter { it.enabled },
-                                settings = settings,
+                                state = currentState,
+                                audioRecord = audioRecord,
+                                shortBuffer = shortBuffer,
+                                recognizer = recognizer,
+                                stream = stream,
+                                rollingVoiceBuffer = rollingVoiceBuffer,
                                 utteranceTriggeredCounts = utteranceTriggeredCounts,
                                 lastAlertRealtimeMs = lastAlertRealtimeMs
                             )
                         } else {
-                            MonitorStateStore.updateLivePreview(lastRecognizedText, rms)
+                            MonitorStateStore.updateLivePreview(lastRecognizedText, uiRms)
                         }
 
                         val nowMs = SystemClock.elapsedRealtime()
@@ -248,6 +285,8 @@ class MonitorForegroundService : Service() {
                 } finally {
                     stream.release()
                 }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
             } catch (e: Exception) {
                 Log.e(TAG, "Error inside recognition loop", e)
                 MonitorStateStore.setRunningState(false, "监听异常中断：${e.localizedMessage ?: "未知错误"}")
@@ -271,14 +310,22 @@ class MonitorForegroundService : Service() {
 
     private fun checkAndTriggerKeywords(
         currentText: String,
-        activeKeywords: List<KeywordItem>,
-        settings: MonitorSettings,
+        state: MonitorUiState,
+        audioRecord: AudioRecord,
+        shortBuffer: ShortArray,
+        recognizer: OnlineRecognizer,
+        stream: OnlineStream,
+        rollingVoiceBuffer: RollingVoiceBuffer,
         utteranceTriggeredCounts: MutableMap<String, Int>,
         lastAlertRealtimeMs: MutableMap<String, Long>
     ) {
+        val activeKeywords = state.keywords.filter { it.enabled }
         if (activeKeywords.isEmpty()) return
+
+        val settings = state.settings
         val nowMs = SystemClock.elapsedRealtime()
         val cooldownMs = settings.cooldownSeconds * 1000L
+        val useVoiceprint = settings.voiceprintEnabled && state.voiceprintProfile.isEnrolled
 
         for (item in activeKeywords) {
             val kw = item.word
@@ -289,17 +336,81 @@ class MonitorForegroundService : Service() {
             if (occurrencesNow > prevOccurrences) {
                 utteranceTriggeredCounts[kw] = occurrencesNow
                 val lastMs = lastAlertRealtimeMs[kw] ?: 0L
-                if (lastMs == 0L || (nowMs - lastMs) >= cooldownMs) {
+                if (lastMs != 0L && (nowMs - lastMs) < cooldownMs) {
+                    continue
+                }
+
+                if (!useVoiceprint) {
                     lastAlertRealtimeMs[kw] = nowMs
-                    val hitRecord = MonitorStateStore.recordKeywordHit(kw, currentText)
+                    val hitRecord = MonitorStateStore.recordSelfKeywordHit(kw, currentText, null)
                     NotificationHelper.triggerCatchphraseAlert(
                         context = applicationContext,
                         word = kw,
                         todayCount = hitRecord.todayCountAfterHit,
                         snippet = hitRecord.snippet,
                         pushEnabled = settings.pushAlertEnabled,
-                        vibrateEnabled = settings.vibrateEnabled
+                        vibrateEnabled = settings.vibrateEnabled,
+                        similarity = null
                     )
+                } else {
+                    // Micro-extension (up to 200ms) if active voice is very brief (<0.65s)
+                    var extraReads = 0
+                    while (rollingVoiceBuffer.activeVoiceDurationSec() < 0.65f && extraReads < 2) {
+                        val extraCount = audioRecord.read(shortBuffer, 0, shortBuffer.size)
+                        if (extraCount <= 0) break
+                        var sumSq = 0.0
+                        val extraRaw = FloatArray(extraCount)
+                        val gain = if (settings.micBoost) 2.2f else 1.0f
+                        val extraBoosted = FloatArray(extraCount)
+                        for (i in 0 until extraCount) {
+                            val r = (shortBuffer[i] / 32768.0f).coerceIn(-1.0f, 1.0f)
+                            extraRaw[i] = r
+                            sumSq += r * r
+                            extraBoosted[i] = (r * gain).coerceIn(-1.0f, 1.0f)
+                        }
+                        val extraRms = sqrt(sumSq / extraCount).toFloat()
+                        rollingVoiceBuffer.append(extraRaw, extraRms)
+                        stream.acceptWaveform(extraBoosted, SAMPLE_RATE)
+                        while (recognizer.isReady(stream)) {
+                            recognizer.decode(stream)
+                        }
+                        extraReads++
+                    }
+
+                    val recentVoice = rollingVoiceBuffer.extractRecentActiveVoice(SAMPLE_RATE * 2)
+                    val liveEmb = VoiceprintManager.extractEmbedding(
+                        context = applicationContext,
+                        samples = recentVoice,
+                        sampleRate = SAMPLE_RATE
+                    )
+                    val updatedText = recognizer.getResult(stream).text.trim().ifEmpty { currentText }
+
+                    if (liveEmb == null) {
+                        // Too brief/quiet to form a reliable voiceprint -> treat cautiously as non-trigger
+                        MonitorStateStore.recordFilteredOtherVoice(kw, updatedText, 0.15f)
+                    } else {
+                        val similarity = VoiceprintManager.computeBestSimilarity(
+                            liveEmbedding = liveEmb,
+                            enrolledVectors = state.voiceprintProfile.enrolledVectors
+                        )
+                        if (similarity >= settings.voiceprintThreshold) {
+                            lastAlertRealtimeMs[kw] = SystemClock.elapsedRealtime()
+                            val hitRecord = MonitorStateStore.recordSelfKeywordHit(kw, updatedText, similarity)
+                            NotificationHelper.triggerCatchphraseAlert(
+                                context = applicationContext,
+                                word = kw,
+                                todayCount = hitRecord.todayCountAfterHit,
+                                snippet = hitRecord.snippet,
+                                pushEnabled = settings.pushAlertEnabled,
+                                vibrateEnabled = settings.vibrateEnabled,
+                                similarity = similarity
+                            )
+                        } else {
+                            // Filtered someone else's voice! Apply a brief 1.5s dedup cooldown
+                            lastAlertRealtimeMs[kw] = SystemClock.elapsedRealtime() - (cooldownMs - 1500L).coerceAtLeast(0L)
+                            MonitorStateStore.recordFilteredOtherVoice(kw, updatedText, similarity)
+                        }
+                    }
                 }
             }
         }
@@ -325,7 +436,7 @@ class MonitorForegroundService : Service() {
                 "CatchphraseGuard::MicMonitorLock"
             ).apply {
                 setReferenceCounted(false)
-                acquire(12 * 60 * 60 * 1000L) // Up to 12 hours safety cap
+                acquire(12 * 60 * 60 * 1000L)
             }
         } catch (e: Exception) {
             Log.w(TAG, "Unable to acquire partial wake lock", e)
@@ -348,7 +459,7 @@ class MonitorForegroundService : Service() {
         notificationSyncJob?.cancel()
         notificationSyncJob = null
         releasePartialWakeLock()
-        MonitorStateStore.setRunningState(false, "已停止监听")
+        MonitorStateStore.setRunningState(false, "待机中 · 点击下方开启守护")
         ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
@@ -358,7 +469,7 @@ class MonitorForegroundService : Service() {
         notificationSyncJob?.cancel()
         serviceScope.cancel()
         releasePartialWakeLock()
-        MonitorStateStore.setRunningState(false, "已停止监听")
+        MonitorStateStore.setRunningState(false, "待机中 · 点击下方开启守护")
         super.onDestroy()
     }
 }

@@ -16,6 +16,7 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import java.util.concurrent.atomic.AtomicInteger
+import kotlin.math.roundToInt
 
 object NotificationHelper {
     const val ONGOING_NOTIFICATION_ID = 1001
@@ -41,7 +42,7 @@ object NotificationHelper {
             "口头禅命中推送提醒",
             NotificationManager.IMPORTANCE_HIGH
         ).apply {
-            description = "检测到你说出设定的口头禅时立即弹出消息提醒"
+            description = "检测到你本人说出设定的口头禅时立即弹出消息提醒"
             enableVibration(true)
             vibrationPattern = longArrayOf(0, 90, 70, 90, 70, 140)
             lockscreenVisibility = Notification.VISIBILITY_PUBLIC
@@ -54,7 +55,8 @@ object NotificationHelper {
     fun buildOngoingNotification(
         context: Context,
         activeKeywords: List<String>,
-        todayTotalCount: Int
+        todayTotalCount: Int,
+        voiceprintProtected: Boolean = false
     ): Notification {
         ensureChannels(context)
 
@@ -83,10 +85,11 @@ object NotificationHelper {
         } else {
             activeKeywords.joinToString("、")
         }
+        val modeTag = if (voiceprintProtected) "声纹护盾开启" else "全员监听"
 
         return NotificationCompat.Builder(context, STATUS_CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_mic_notify)
-            .setContentTitle("口头禅后台监听中 · 今日 $todayTotalCount 次")
+            .setContentTitle("口头禅守护中 · 今日 $todayTotalCount 次 ($modeTag)")
             .setContentText("盯防词：$wordsText")
             .setOngoing(true)
             .setOnlyAlertOnce(true)
@@ -99,10 +102,16 @@ object NotificationHelper {
     fun updateOngoingNotification(
         context: Context,
         activeKeywords: List<String>,
-        todayTotalCount: Int
+        todayTotalCount: Int,
+        voiceprintProtected: Boolean = false
     ) {
         if (!canPostNotifications(context)) return
-        val notification = buildOngoingNotification(context, activeKeywords, todayTotalCount)
+        val notification = buildOngoingNotification(
+            context = context,
+            activeKeywords = activeKeywords,
+            todayTotalCount = todayTotalCount,
+            voiceprintProtected = voiceprintProtected
+        )
         try {
             NotificationManagerCompat.from(context).notify(ONGOING_NOTIFICATION_ID, notification)
         } catch (_: SecurityException) {
@@ -115,7 +124,8 @@ object NotificationHelper {
         todayCount: Int,
         snippet: String,
         pushEnabled: Boolean,
-        vibrateEnabled: Boolean
+        vibrateEnabled: Boolean,
+        similarity: Float? = null
     ) {
         ensureChannels(context)
 
@@ -135,10 +145,15 @@ object NotificationHelper {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        val bodyText = if (snippet.isNotBlank()) {
-            "今日第 $todayCount 次说「$word」 · 识别片段：$snippet"
+        val simTag = if (similarity != null) {
+            " · 本人声纹 ${(similarity * 100).roundToInt()}%"
         } else {
-            "今日第 $todayCount 次抓到你说「$word」"
+            ""
+        }
+        val bodyText = if (snippet.isNotBlank()) {
+            "今日第 $todayCount 次说「$word」$simTag\n刚刚语境：$snippet"
+        } else {
+            "今日第 $todayCount 次抓到你说「$word」$simTag"
         }
 
         val notification = NotificationCompat.Builder(context, ALERT_CHANNEL_ID)
