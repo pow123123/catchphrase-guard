@@ -14,6 +14,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -28,24 +29,20 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Slider
-import androidx.compose.material3.SliderDefaults
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -61,12 +58,20 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -78,7 +83,9 @@ import com.selfuse.catchphraseguard.VoiceCaptureResult
 import com.selfuse.catchphraseguard.VoiceprintManager
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.launch
+import kotlin.math.abs
 import kotlin.math.roundToInt
+import kotlin.math.sin
 
 private data class CasualChatTopic(
     val stageBadge: String,
@@ -86,24 +93,20 @@ private data class CasualChatTopic(
     val questions: List<String>
 )
 
-/**
- * Zero-script conversational prompts: NO sentences to read aloud!
- * Elicits 100% spontaneous everyday voice and natural "没有 / 不是" rebuttals.
- */
 private val CASUAL_CHAT_TOPICS = listOf(
     CasualChatTopic(
-        stageBadge = "闲聊 1 / 3 · 日常松弛语气",
-        subtitleHint = "像回朋友微信语音一样张嘴随口答，不限字数，说完松手或停顿即止",
+        stageBadge = "录音棚 01 / 03 · 日常松弛声线",
+        subtitleHint = "像回朋友微信语音一样张嘴随口答，不限时长，说完松手或自然停顿即止",
         questions = listOf(
-            "你今天上一顿饭吃的啥？味道咋样？",
-            "这周末你更想在家睡懒觉，还是出去溜达？",
-            "随口吐槽两句：今天外面的天气舒服吗？",
-            "你平时犯困的时候，一般爱喝咖啡、茶还是冰水？"
+            "随口说说你今天上一顿饭吃的啥？味道咋样？",
+            "这周末你更想在家睡懒觉，还是出去转转？",
+            "随口吐槽一句：今天外面的天气舒服吗？",
+            "你平时困的时候一般爱喝冰美式、奶茶还是白水？"
         )
     ),
     CasualChatTopic(
-        stageBadge = "闲聊 2 / 3 · 诱发自然反驳腔",
-        subtitleHint = "不用想词，用你平时带「没有」或「不是」的口吻随口否认我一句！",
+        stageBadge = "录音棚 02 / 03 · 诱发自然反驳腔",
+        subtitleHint = "不用想词，用你平时带「没有」或「不是」的语气随口反驳我一句！",
         questions = listOf(
             "老实交代，你是不是每天凌晨四点半起床去跑十公里？",
             "听说你刚才准备把手机丢进火锅里涮一下，真的假的？",
@@ -112,47 +115,71 @@ private val CASUAL_CHAT_TOPICS = listOf(
         )
     ),
     CasualChatTopic(
-        stageBadge = "闲聊 3 / 3 · 放远距离随口聊",
-        subtitleHint = "把手机拿远一臂（或直接放桌上），随口聊一句就能兼容桌面与口袋距离",
+        stageBadge = "录音棚 03 / 03 · 桌面远场声学采样",
+        subtitleHint = "把手机拿远一臂（或放桌上），随口说一句即可兼容桌面与口袋距离",
         questions = listOf(
-            "手机放远一点，随口说说你现在是坐着、站着还是靠着？",
+            "手机放远一点，随口告诉我你现在是坐着还是靠着？",
             "离手机远一点，随口聊聊你周围现在吵不吵？",
-            "把手机放桌上，随口说说今天手头事情多不多？"
+            "把手机放桌上，随口说说今天手头事情忙不忙？"
         )
     )
 )
 
-private val QUICK_SUGGESTIONS = listOf("那个", "然后", "其实", "就是说", "怎么说呢", "讲真")
+private val QUICK_SUGGESTIONS = listOf("那个", "然后", "其实", "就是说", "怎么说呢", "讲真", "说白了", "坦白讲")
 
 @Composable
 fun VoiceprintAndWordsTab(
     uiState: MonitorUiState
 ) {
+    val palette = LocalVinylPalette.current
     val context = LocalContext.current
-    var showChatStudio by remember { mutableStateOf(false) }
+    var showStudioModal by remember { mutableStateOf(false) }
+    var showAddWordModal by remember { mutableStateOf(false) }
 
     val micPermLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
     ) { granted ->
         if (granted) {
-            showChatStudio = true
+            showStudioModal = true
         } else {
             Toast.makeText(context, "采集声纹需要麦克风权限", Toast.LENGTH_LONG).show()
         }
     }
 
+    val sortedKeywords = remember(uiState.keywords) {
+        uiState.keywords.sortedWith(
+            compareByDescending<com.selfuse.catchphraseguard.KeywordItem> { it.todayCount }
+                .thenByDescending { it.totalCount }
+        )
+    }
+
     LazyColumn(
-        modifier = Modifier.fillMaxSize(),
+        modifier = Modifier
+            .fillMaxSize()
+            .statusBarsPadding(),
         contentPadding = PaddingValues(
-            start = 20.dp,
-            end = 20.dp,
-            top = 6.dp,
-            bottom = 112.dp
+            start = 18.dp,
+            end = 18.dp,
+            top = 12.dp,
+            bottom = 20.dp
         ),
         verticalArrangement = Arrangement.spacedBy(18.dp)
     ) {
         item {
-            VoiceprintStudioCard(
+            Text(
+                text = "声纹歌单榜",
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Bold,
+                color = palette.textPrimary,
+                textAlign = TextAlign.Center,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 2.dp)
+            )
+        }
+
+        item {
+            BlackVinylVipStudioCard(
                 uiState = uiState,
                 onOpenStudio = {
                     val hasMic = ContextCompat.checkSelfPermission(
@@ -160,7 +187,7 @@ fun VoiceprintAndWordsTab(
                         Manifest.permission.RECORD_AUDIO
                     ) == PackageManager.PERMISSION_GRANTED
                     if (hasMic) {
-                        showChatStudio = true
+                        showStudioModal = true
                     } else {
                         micPermLauncher.launch(Manifest.permission.RECORD_AUDIO)
                     }
@@ -169,290 +196,668 @@ fun VoiceprintAndWordsTab(
         }
 
         item {
-            CatchphrasePillsCard(uiState = uiState)
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 4.dp)
+            ) {
+                Column {
+                    Text(
+                        text = "热词盯防榜",
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = palette.textPrimary
+                    )
+                    Text(
+                        text = "按触发热度实时排榜 · 监听中随时生效",
+                        fontSize = 11.sp,
+                        color = palette.textMuted
+                    )
+                }
+
+                // + 新增热词 capsule button
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(50))
+                        .background(palette.neteaseRedContainer)
+                        .border(1.dp, palette.neteaseRed.copy(alpha = 0.55f), RoundedCornerShape(50))
+                        .clickable { showAddWordModal = true }
+                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Add,
+                        contentDescription = null,
+                        tint = palette.neteaseRedBright,
+                        modifier = Modifier.size(15.dp)
+                    )
+                    Spacer(modifier = Modifier.width(3.dp))
+                    Text(
+                        text = "新增热词",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = palette.neteaseRedBright
+                    )
+                }
+            }
+        }
+
+        if (sortedKeywords.isEmpty()) {
+            item {
+                VinylSectionCard(modifier = Modifier.fillMaxWidth()) {
+                    Text(
+                        text = "歌单里还没有盯防热词，点击右上角「+ 新增热词」添加吧",
+                        fontSize = 13.sp,
+                        color = palette.textMuted,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 18.dp)
+                    )
+                }
+            }
+        } else {
+            itemsIndexed(
+                items = sortedKeywords,
+                key = { _, item -> item.word }
+            ) { index, item ->
+                HotWordChartRow(
+                    rank = index + 1,
+                    item = item,
+                    onToggle = { enabled ->
+                        MonitorStateStore.toggleKeyword(item.word, enabled)
+                    },
+                    onDelete = {
+                        MonitorStateStore.removeKeyword(item.word)
+                    }
+                )
+            }
         }
     }
 
-    if (showChatStudio) {
+    if (showStudioModal) {
         ConversationalVoiceprintDialog(
-            onDismiss = { showChatStudio = false },
+            onDismiss = { showStudioModal = false },
             onFinished = { allEmbeddings ->
                 MonitorStateStore.saveEnrolledVoiceprint(
                     allExtractedEmbeddings = allEmbeddings,
                     stepCount = CASUAL_CHAT_TOPICS.size
                 )
-                showChatStudio = false
-                Toast.makeText(context, "自然声纹已建立！现在只认你本人的声音", Toast.LENGTH_LONG).show()
+                showStudioModal = false
+                Toast.makeText(context, "黑胶 VIP 专属声纹已锁定！", Toast.LENGTH_LONG).show()
+            }
+        )
+    }
+
+    if (showAddWordModal) {
+        AddHotwordSheetDialog(
+            existingWords = uiState.keywords.map { it.word }.toSet(),
+            onDismiss = { showAddWordModal = false },
+            onAddWord = { word ->
+                if (MonitorStateStore.addKeyword(word)) {
+                    Toast.makeText(context, "已加入盯防榜：「$word」", Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(context, "请输入不重复的热词", Toast.LENGTH_SHORT).show()
+                }
             }
         )
     }
 }
 
+/**
+ * NetEase Black-Vinyl VIP Dark-Bronze & Gold Voiceprint Card matching Screen 2 mockup!
+ */
 @Composable
-private fun VoiceprintStudioCard(
+private fun BlackVinylVipStudioCard(
     uiState: MonitorUiState,
     onOpenStudio: () -> Unit
 ) {
-    val palette = LocalOriginPalette.current
+    val palette = LocalVinylPalette.current
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val profile = uiState.voiceprintProfile
     val settings = uiState.settings
 
-    var isTesting by remember { mutableStateOf(false) }
-    var testLiveRms by remember { mutableFloatStateOf(0f) }
+    var isQuickTesting by remember { mutableStateOf(false) }
+    var testRms by remember { mutableFloatStateOf(0f) }
     var testScore by remember { mutableStateOf<Float?>(null) }
     var testHint by remember { mutableStateOf<String?>(null) }
     var testStopDeferred by remember { mutableStateOf<CompletableDeferred<Unit>?>(null) }
 
-    OriginGlassCard(modifier = Modifier.fillMaxWidth()) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
-                ShieldCanvasIcon(
-                    tint = if (profile.isEnrolled) palette.shieldEmerald else palette.accentBlue,
-                    size = 24.dp
-                )
-                Spacer(modifier = Modifier.width(10.dp))
-                Column {
-                    Text(
-                        text = "声纹工坊 · Voiceprint Studio",
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = palette.textPrimary
+    val cardShape = RoundedCornerShape(24.dp)
+
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .shadow(elevation = 16.dp, shape = cardShape, spotColor = Color(0x66000000))
+            .clip(cardShape)
+            .background(
+                brush = Brush.linearGradient(
+                    colors = listOf(
+                        Color(0xFF332319),
+                        Color(0xFF1C1417),
+                        Color(0xFF2E1519)
                     )
-                    Text(
-                        text = if (profile.isEnrolled) {
-                            "已激活自然声纹 (${profile.enrolledVectors.size} 维子特征) · ${profile.updatedAtText}"
-                        } else {
-                            "零念稿闲聊采集 · 只让你的声音触发提醒"
-                        },
-                        fontSize = 12.sp,
-                        color = palette.textSecondary
-                    )
-                }
-            }
-
-            if (profile.isEnrolled) {
-                Switch(
-                    checked = settings.voiceprintEnabled,
-                    onCheckedChange = { enabled ->
-                        MonitorStateStore.updateSettings { it.copy(voiceprintEnabled = enabled) }
-                    }
                 )
-            }
-        }
-
-        Spacer(modifier = Modifier.height(16.dp))
-
-        Row(
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Button(
-                onClick = onOpenStudio,
-                enabled = !isTesting,
-                shape = RoundedCornerShape(50),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = palette.accentBlue
-                ),
-                modifier = Modifier
-                    .weight(1f)
-                    .height(48.dp)
-            ) {
-                Text(
-                    text = if (profile.isEnrolled) "闲聊重录 / 校准声纹" else "像聊微信一样建立我的声纹",
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.Bold
-                )
-            }
-
-            if (profile.isEnrolled) {
-                OutlinedButton(
-                    onClick = {
-                        MonitorStateStore.clearVoiceprint()
-                        testScore = null
-                        Toast.makeText(context, "已清空声纹档案", Toast.LENGTH_SHORT).show()
-                    },
-                    enabled = !isTesting,
-                    shape = RoundedCornerShape(50),
-                    modifier = Modifier.height(48.dp)
-                ) {
-                    Text("清空", fontSize = 13.sp, color = palette.alertCoral)
-                }
-            }
-        }
-
-        if (profile.isEnrolled) {
-            Spacer(modifier = Modifier.height(16.dp))
-            HorizontalDivider(color = palette.cardBorder.copy(alpha = 0.45f))
-            Spacer(modifier = Modifier.height(14.dp))
-
-            // Interactive Free-Length Test Sandbox
-            Text(
-                text = "随口试音验真身（不限秒数，说完自动出结果）",
-                fontSize = 13.sp,
-                fontWeight = FontWeight.SemiBold,
-                color = palette.textPrimary
             )
-            Spacer(modifier = Modifier.height(8.dp))
-
-            IridescentSpeakCapsule(
-                isRecording = isTesting,
-                liveRms = testLiveRms,
-                idleLabel = "按住随口说一句（或轻点免提试音）",
-                recordingLabel = "正在听… 松手或停顿即出结果",
-                onStartCapture = {
-                    if (!isTesting) {
-                        val deferred = CompletableDeferred<Unit>()
-                        testStopDeferred = deferred
-                        isTesting = true
-                        testHint = null
-                        scope.launch {
-                            val res = VoiceprintManager.captureInteractiveUtterance(
-                                context = context,
-                                stopSignal = deferred,
-                                autoStopOnSilence = true,
-                                multiScale = false,
-                                onLiveFeedback = { _, rms, _ ->
-                                    testLiveRms = rms
-                                }
-                            )
-                            isTesting = false
-                            testLiveRms = 0f
-                            when (res) {
-                                is VoiceCaptureResult.Success -> {
-                                    testScore = VoiceprintManager.computeBestSimilarity(
-                                        liveEmbedding = res.primaryEmbedding,
-                                        enrolledVectors = profile.enrolledVectors
-                                    )
-                                }
-                                is VoiceCaptureResult.TooQuiet -> {
-                                    testHint = "声音有点太短啦，像平时说话一样随口说半句试试～"
-                                }
-                                is VoiceCaptureResult.Error -> {
-                                    testHint = res.message
-                                }
-                            }
-                        }
-                    }
-                },
-                onFinishCapture = {
-                    testStopDeferred?.complete(Unit)
-                }
-            )
-
-            if (testHint != null) {
-                Spacer(modifier = Modifier.height(8.dp))
-                Text(
-                    text = testHint ?: "",
-                    fontSize = 12.sp,
-                    color = palette.warningAmber
-                )
-            }
-
-            val currentScore = testScore
-            if (currentScore != null) {
-                Spacer(modifier = Modifier.height(12.dp))
-                val passed = currentScore >= settings.voiceprintThreshold
-                val animatedRatio by animateFloatAsState(
-                    targetValue = currentScore.coerceIn(0f, 1f),
-                    animationSpec = tween(durationMillis = 360),
-                    label = "sandboxScore"
-                )
-                val barColor = if (passed) palette.shieldEmerald else palette.alertCoral
-
-                Row(
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text(
-                        text = "声纹匹配度 ${(currentScore * 100).roundToInt()}%",
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = barColor
-                    )
-                    OriginPillBadge(
-                        backgroundColor = if (passed) palette.shieldContainer else palette.alertContainer
-                    ) {
-                        Text(
-                            text = if (passed) "是你本人 · 会触发提醒" else "他人声音 · 已静默拦截",
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = barColor
+            .border(
+                BorderStroke(
+                    width = 1.dp,
+                    brush = Brush.linearGradient(
+                        colors = listOf(
+                            palette.vinylGold.copy(alpha = 0.72f),
+                            palette.vinylGoldDeep.copy(alpha = 0.28f),
+                            palette.neteaseRed.copy(alpha = 0.45f)
                         )
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(6.dp))
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(8.dp)
-                        .clip(RoundedCornerShape(4.dp))
-                        .background(palette.cardSubtleSurface)
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth(animatedRatio)
-                            .fillMaxHeight()
-                            .clip(RoundedCornerShape(4.dp))
-                            .background(barColor)
                     )
-                }
+                ),
+                cardShape
+            )
+    ) {
+        // Decorative subtle golden acoustic wave across card background
+        Canvas(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(175.dp)
+        ) {
+            val midY = size.height * 0.50f
+            val bars = 46
+            val step = size.width / (bars + 1)
+            for (i in 0 until bars) {
+                val ratio = abs(sin(i * 0.35f)) * (if (i in 12..34) 0.25f else 0.75f)
+                val bh = size.height * 0.34f * ratio
+                val x = step * (i + 1)
+                drawLine(
+                    color = palette.vinylGold.copy(alpha = 0.09f),
+                    start = Offset(x, midY - bh / 2f),
+                    end = Offset(x, midY + bh / 2f),
+                    strokeWidth = 1.6.dp.toPx(),
+                    cap = StrokeCap.Round
+                )
             }
+        }
 
-            Spacer(modifier = Modifier.height(14.dp))
-
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp, vertical = 20.dp)
+        ) {
             Row(
+                verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween,
                 modifier = Modifier.fillMaxWidth()
             ) {
+                VinylPillBadge(
+                    backgroundColor = Color(0x33E6C17A),
+                    borderColor = palette.vinylGold.copy(alpha = 0.45f)
+                ) {
+                    Text(
+                        text = "BLACK VINYL · 声纹鉴定",
+                        fontSize = 9.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = palette.vinylGold
+                    )
+                }
+
+                if (profile.isEnrolled) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = if (settings.voiceprintEnabled) "仅本人触发" else "已暂停护盾",
+                            fontSize = 11.sp,
+                            color = palette.vinylGold.copy(alpha = 0.85f)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        NetEaseCapsuleToggle(
+                            checked = settings.voiceprintEnabled,
+                            onCheckedChange = { v ->
+                                MonitorStateStore.updateSettings { it.copy(voiceprintEnabled = v) }
+                            }
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(14.dp))
+
+            Text(
+                text = "黑胶 VIP 声纹工坊",
+                fontSize = 22.sp,
+                fontWeight = FontWeight.ExtraBold,
+                color = Color(0xFFF6DEB0)
+            )
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            VinylPillBadge(
+                backgroundColor = Color(0x66121010),
+                borderColor = palette.vinylGold.copy(alpha = 0.40f)
+            ) {
+                val statusStr = if (profile.isEnrolled) {
+                    "声纹已锁定 · 门槛 ${(settings.voiceprintThreshold * 100).roundToInt()}% · ${profile.enrolledVectors.size} 维特征"
+                } else {
+                    "尚未录入专属声纹 · 零念稿随口聊两句即可锁定"
+                }
                 Text(
-                    text = "本人判定门槛：${(settings.voiceprintThreshold * 100).roundToInt()}%",
-                    fontSize = 13.sp,
+                    text = statusStr,
+                    fontSize = 11.sp,
                     fontWeight = FontWeight.Medium,
-                    color = palette.textPrimary
-                )
-                Text(
-                    text = when {
-                        settings.voiceprintThreshold < 0.29f -> "宽松（高灵敏防漏报）"
-                        settings.voiceprintThreshold > 0.45f -> "严格（强防旁人误报）"
-                        else -> "黄金推荐 (32%~40%)"
-                    },
-                    fontSize = 12.sp,
-                    color = palette.accentBlue
+                    color = palette.vinylGold
                 )
             }
-            Slider(
-                value = settings.voiceprintThreshold,
-                onValueChange = { v ->
-                    MonitorStateStore.updateSettings { it.copy(voiceprintThreshold = v) }
-                },
-                valueRange = 0.20f..0.68f,
-                colors = SliderDefaults.colors(
-                    thumbColor = palette.accentBlue,
-                    activeTrackColor = palette.accentBlue
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // Primary Coral-Red Studio Button + Quick Test Button
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(
+                    contentAlignment = Alignment.Center,
+                    modifier = Modifier
+                        .height(42.dp)
+                        .shadow(
+                            elevation = 12.dp,
+                            shape = RoundedCornerShape(50),
+                            ambientColor = palette.neteaseRed,
+                            spotColor = palette.neteaseRed
+                        )
+                        .clip(RoundedCornerShape(50))
+                        .background(
+                            brush = Brush.horizontalGradient(
+                                colors = listOf(Color(0xFFFF5E58), palette.neteaseRed)
+                            )
+                        )
+                        .clickable(enabled = !isQuickTesting, onClick = onOpenStudio)
+                        .padding(horizontal = 24.dp)
+                ) {
+                    Text(
+                        text = if (profile.isEnrolled) "重录 / 校准声纹" else "进入录音棚采集声纹",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White
+                    )
+                }
+
+                if (profile.isEnrolled) {
+                    Box(
+                        contentAlignment = Alignment.Center,
+                        modifier = Modifier
+                            .height(42.dp)
+                            .clip(RoundedCornerShape(50))
+                            .background(
+                                if (isQuickTesting) palette.neteaseRedContainer else Color(0x4D000000)
+                            )
+                            .border(
+                                1.dp,
+                                if (isQuickTesting) palette.neteaseRedBright else palette.vinylGold.copy(alpha = 0.5f),
+                                RoundedCornerShape(50)
+                            )
+                            .pointerInput(isQuickTesting) {
+                                detectTapGestures(
+                                    onPress = {
+                                        if (!isQuickTesting) {
+                                            val downMs = SystemClock.elapsedRealtime()
+                                            val deferred = CompletableDeferred<Unit>()
+                                            testStopDeferred = deferred
+                                            isQuickTesting = true
+                                            testHint = null
+                                            scope.launch {
+                                                val res = VoiceprintManager.captureInteractiveUtterance(
+                                                    context = context,
+                                                    stopSignal = deferred,
+                                                    autoStopOnSilence = true,
+                                                    multiScale = false,
+                                                    onLiveFeedback = { _, rms, _ -> testRms = rms }
+                                                )
+                                                isQuickTesting = false
+                                                testRms = 0f
+                                                when (res) {
+                                                    is VoiceCaptureResult.Success -> {
+                                                        testScore = VoiceprintManager.computeBestSimilarity(
+                                                            liveEmbedding = res.primaryEmbedding,
+                                                            enrolledVectors = profile.enrolledVectors
+                                                        )
+                                                    }
+                                                    is VoiceCaptureResult.TooQuiet -> {
+                                                        testHint = "声音偏短，随口多说半句试试～"
+                                                    }
+                                                    is VoiceCaptureResult.Error -> {
+                                                        testHint = res.message
+                                                    }
+                                                }
+                                            }
+                                            val released = tryAwaitRelease()
+                                            if (released && (SystemClock.elapsedRealtime() - downMs) >= 380L) {
+                                                deferred.complete(Unit)
+                                            }
+                                        } else {
+                                            testStopDeferred?.complete(Unit)
+                                        }
+                                    }
+                                )
+                            }
+                            .padding(horizontal = 16.dp)
+                    ) {
+                        Text(
+                            text = if (isQuickTesting) "聆听中…点击结束" else "随口试音",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = if (isQuickTesting) palette.neteaseRedBright else palette.vinylGold
+                        )
+                    }
+                }
+            }
+
+            if (isQuickTesting) {
+                Spacer(modifier = Modifier.height(12.dp))
+                SymmetricHarmonicWaveform(
+                    level = testRms,
+                    isActive = true,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(28.dp)
                 )
+            }
+
+            if (testHint != null) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(text = testHint ?: "", fontSize = 11.sp, color = palette.vinylGold)
+            }
+
+            val score = testScore
+            if (score != null && !isQuickTesting) {
+                Spacer(modifier = Modifier.height(12.dp))
+                val isSelf = score >= settings.voiceprintThreshold
+                val animScore by animateFloatAsState(
+                    targetValue = score.coerceIn(0f, 1f),
+                    animationSpec = tween(320),
+                    label = "vipTestBar"
+                )
+                val resultColor = if (isSelf) palette.shieldEmerald else palette.neteaseRedBright
+
+                Row(
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = "试音匹配度 ${(score * 100).roundToInt()}%",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = resultColor
+                    )
+                    Text(
+                        text = if (isSelf) "鉴定：本人真声（正常提醒）" else "鉴定：他人声线（静默拦截）",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = resultColor
+                    )
+                }
+                Spacer(modifier = Modifier.height(5.dp))
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(6.dp)
+                        .clip(RoundedCornerShape(3.dp))
+                        .background(Color(0x55000000))
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth(animScore)
+                            .fillMaxHeight()
+                            .clip(RoundedCornerShape(3.dp))
+                            .background(resultColor)
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * NetEase Hot Song Chart Row (`01`, `02`, `03` in bold coral-red + flame popularity + capsule toggle).
+ */
+@Composable
+private fun HotWordChartRow(
+    rank: Int,
+    item: com.selfuse.catchphraseguard.KeywordItem,
+    onToggle: (Boolean) -> Unit,
+    onDelete: () -> Unit
+) {
+    val palette = LocalVinylPalette.current
+    val isTopThree = rank <= 3
+    val rankString = "%02d".format(rank)
+
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(18.dp))
+            .background(palette.cardSurface)
+            .border(1.dp, palette.cardBorder, RoundedCornerShape(18.dp))
+            .padding(horizontal = 14.dp, vertical = 13.dp)
+    ) {
+        Text(
+            text = rankString,
+            fontSize = 19.sp,
+            fontWeight = FontWeight.ExtraBold,
+            color = if (isTopThree) palette.neteaseRed else palette.textMuted,
+            modifier = Modifier.width(34.dp)
+        )
+
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = item.word,
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Bold,
+                color = if (item.enabled) palette.textPrimary else palette.textMuted
+            )
+            Spacer(modifier = Modifier.height(3.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                FlameMiniIcon(
+                    tint = if (item.todayCount > 0) palette.neteaseRedBright else palette.textMuted,
+                    size = 12.dp
+                )
+                Spacer(modifier = Modifier.width(4.dp))
+                Text(
+                    text = "今日触发 ${item.todayCount} 次 · 累计 ${item.totalCount} 次",
+                    fontSize = 11.sp,
+                    color = palette.textSecondary
+                )
+            }
+        }
+
+        NetEaseCapsuleToggle(
+            checked = item.enabled,
+            onCheckedChange = onToggle
+        )
+
+        Spacer(modifier = Modifier.width(6.dp))
+
+        Box(
+            contentAlignment = Alignment.Center,
+            modifier = Modifier
+                .size(28.dp)
+                .clip(CircleShape)
+                .clickable(onClick = onDelete)
+        ) {
+            Icon(
+                imageVector = Icons.Default.Close,
+                contentDescription = "移除热词",
+                tint = palette.textMuted,
+                modifier = Modifier.size(16.dp)
             )
         }
     }
 }
 
 /**
- * Full Aura Liquid Glass Conversational Q&A Voiceprint Studio Dialog
- * matching the right-hand screen of Style A ("Voiceprint Studio" chat bubble + glowing speak pill).
+ * Custom Dark-Frosted Sheet for Adding Catchphrases (recessed capsule input + hot suggestion cloud).
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun AddHotwordSheetDialog(
+    existingWords: Set<String>,
+    onDismiss: () -> Unit,
+    onAddWord: (String) -> Unit
+) {
+    val palette = LocalVinylPalette.current
+    var inputText by remember { mutableStateOf("") }
+    val remaining = remember(existingWords) {
+        QUICK_SUGGESTIONS.filterNot { it in existingWords }
+    }
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Box(
+            contentAlignment = Alignment.Center,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 22.dp)
+        ) {
+            VinylSectionCard(
+                containerColor = Color(0xFA1B1C24),
+                borderColor = Color(0xFF343746),
+                cornerRadius = 26.dp,
+                contentPadding = PaddingValues(22.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = "添加盯防热词",
+                        fontSize = 17.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = palette.textPrimary
+                    )
+                    IconButton(onClick = onDismiss, modifier = Modifier.size(26.dp)) {
+                        Icon(
+                            imageVector = Icons.Default.Close,
+                            contentDescription = "关闭",
+                            tint = palette.textSecondary
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(14.dp))
+
+                // Custom Recessed Dark Capsule Input + Red Add Pill
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp)
+                        .clip(RoundedCornerShape(50))
+                        .background(palette.cardRecessed)
+                        .border(1.dp, Color(0xFF2F3240), RoundedCornerShape(50))
+                        .padding(start = 16.dp, end = 6.dp)
+                ) {
+                    Box(
+                        contentAlignment = Alignment.CenterStart,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        if (inputText.isEmpty()) {
+                            Text(
+                                text = "输入你想戒掉的口头禅…",
+                                fontSize = 13.sp,
+                                color = palette.textMuted
+                            )
+                        }
+                        BasicTextField(
+                            value = inputText,
+                            onValueChange = { inputText = it },
+                            singleLine = true,
+                            textStyle = TextStyle(
+                                color = palette.textPrimary,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Medium
+                            ),
+                            cursorBrush = SolidColor(palette.neteaseRed),
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+
+                    Box(
+                        contentAlignment = Alignment.Center,
+                        modifier = Modifier
+                            .height(36.dp)
+                            .clip(RoundedCornerShape(50))
+                            .background(palette.neteaseRed)
+                            .clickable {
+                                val trimmed = inputText.trim()
+                                if (trimmed.isNotEmpty()) {
+                                    onAddWord(trimmed)
+                                    inputText = ""
+                                    onDismiss()
+                                }
+                            }
+                            .padding(horizontal = 16.dp)
+                    ) {
+                        Text(
+                            text = "加入榜单",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White
+                        )
+                    }
+                }
+
+                if (remaining.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Text(
+                        text = "高频口头禅一键点选",
+                        fontSize = 12.sp,
+                        color = palette.textMuted
+                    )
+                    Spacer(modifier = Modifier.height(10.dp))
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        remaining.forEach { word ->
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(50))
+                                    .background(palette.cardElevated)
+                                    .border(1.dp, palette.cardBorder, RoundedCornerShape(50))
+                                    .clickable {
+                                        onAddWord(word)
+                                    }
+                                    .padding(horizontal = 13.dp, vertical = 6.dp)
+                            ) {
+                                Text(
+                                    text = "+ $word",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = palette.vinylGold
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Dark Studio Conversational Voiceprint Recording Sheet matching Screen 4 mockup!
  */
 @Composable
 private fun ConversationalVoiceprintDialog(
     onDismiss: () -> Unit,
     onFinished: (List<FloatArray>) -> Unit
 ) {
-    val palette = LocalOriginPalette.current
+    val palette = LocalVinylPalette.current
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
@@ -473,95 +878,91 @@ private fun ConversationalVoiceprintDialog(
         properties = DialogProperties(usePlatformDefaultWidth = false)
     ) {
         Box(
-            contentAlignment = Alignment.Center,
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 20.dp)
+            contentAlignment = Alignment.BottomCenter,
+            modifier = Modifier.fillMaxSize()
         ) {
-            OriginGlassCard(
-                cornerRadius = 30.dp,
-                containerColor = if (palette.isDark) Color(0xF0152238) else Color(0xEEFFFFFF),
-                contentPadding = PaddingValues(24.dp),
-                modifier = Modifier.fillMaxWidth()
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(topStart = 30.dp, topEnd = 30.dp))
+                    .background(
+                        brush = Brush.verticalGradient(
+                            colors = listOf(Color(0xFA221A1D), Color(0xFC14151B))
+                        )
+                    )
+                    .border(
+                        width = 1.dp,
+                        color = Color(0xFF3A2D30),
+                        shape = RoundedCornerShape(topStart = 30.dp, topEnd = 30.dp)
+                    )
+                    .padding(horizontal = 24.dp, vertical = 22.dp)
             ) {
-                // Header + Step pill indicator (`·  ━━  ·` matching Style A mockup)
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
                     modifier = Modifier.fillMaxWidth()
                 ) {
+                    Spacer(modifier = Modifier.width(28.dp))
                     Text(
-                        text = "Voiceprint Studio",
-                        fontSize = 18.sp,
+                        text = "零念稿 · 快问快答录音棚",
+                        fontSize = 16.sp,
                         fontWeight = FontWeight.Bold,
                         color = palette.textPrimary
                     )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        verticalAlignment = Alignment.CenterVertically
+                    IconButton(
+                        onClick = { if (!isRecording) onDismiss() },
+                        modifier = Modifier.size(28.dp)
                     ) {
-                        for (i in CASUAL_CHAT_TOPICS.indices) {
-                            val active = i == stepIdx
-                            val done = i < stepIdx
-                            Box(
-                                modifier = Modifier
-                                    .width(if (active) 24.dp else 6.dp)
-                                    .height(6.dp)
-                                    .clip(RoundedCornerShape(3.dp))
-                                    .background(
-                                        when {
-                                            active -> palette.accentBlue
-                                            done -> palette.shieldEmerald
-                                            else -> palette.textMuted.copy(alpha = 0.35f)
-                                        }
-                                    )
-                            )
-                        }
+                        Icon(
+                            imageVector = Icons.Default.Close,
+                            contentDescription = "关闭",
+                            tint = palette.textSecondary
+                        )
                     }
-                    Spacer(modifier = Modifier.height(6.dp))
-                    Text(
-                        text = topic.stageBadge,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = palette.accentBlue
-                    )
                 }
 
-                Spacer(modifier = Modifier.height(18.dp))
+                Spacer(modifier = Modifier.height(16.dp))
 
-                // Frosted Glass Speech-Bubble Question Card (NO reading script!)
+                // Glowing Vintage Gold Studio Condenser Mic Emblem
+                StudioCondenserMicEmblem(isRecording = isRecording)
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                Text(
+                    text = topic.stageBadge,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = palette.vinylGold
+                )
+
+                Spacer(modifier = Modifier.height(14.dp))
+
+                // Dark Speech-Bubble Casual Prompt Card
                 Column(modifier = Modifier.fillMaxWidth()) {
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clip(
                                 RoundedCornerShape(
-                                    topStart = 22.dp,
-                                    topEnd = 22.dp,
-                                    bottomEnd = 22.dp,
+                                    topStart = 20.dp,
+                                    topEnd = 20.dp,
+                                    bottomEnd = 20.dp,
                                     bottomStart = 6.dp
                                 )
                             )
-                            .background(
-                                brush = Brush.linearGradient(
-                                    colors = if (palette.isDark) {
-                                        listOf(Color(0xFF1E3252), Color(0xFF1A2844))
-                                    } else {
-                                        listOf(Color(0xFFE8F4FF), Color(0xFFF3EEFF))
-                                    }
-                                )
-                            )
+                            .background(Color(0xFF24252E))
                             .border(
-                                width = 1.dp,
-                                color = Color.White.copy(alpha = if (palette.isDark) 0.20f else 0.85f),
-                                shape = RoundedCornerShape(
-                                    topStart = 22.dp,
-                                    topEnd = 22.dp,
-                                    bottomEnd = 22.dp,
+                                1.dp,
+                                Color(0xFF363846),
+                                RoundedCornerShape(
+                                    topStart = 20.dp,
+                                    topEnd = 20.dp,
+                                    bottomEnd = 20.dp,
                                     bottomStart = 6.dp
                                 )
                             )
-                            .padding(horizontal = 18.dp, vertical = 18.dp)
+                            .padding(horizontal = 18.dp, vertical = 16.dp)
                     ) {
                         Column {
                             Row(
@@ -570,10 +971,9 @@ private fun ConversationalVoiceprintDialog(
                                 modifier = Modifier.fillMaxWidth()
                             ) {
                                 Text(
-                                    text = "随便聊一句（不用照字念）",
+                                    text = "随便聊一句就行（绝不念稿）",
                                     fontSize = 11.sp,
-                                    fontWeight = FontWeight.SemiBold,
-                                    color = palette.accentBlue
+                                    color = palette.vinylGold
                                 )
                                 Row(
                                     verticalAlignment = Alignment.CenterVertically,
@@ -588,402 +988,243 @@ private fun ConversationalVoiceprintDialog(
                                     Icon(
                                         imageVector = Icons.Default.Refresh,
                                         contentDescription = "换一题",
-                                        tint = palette.accentBlue,
+                                        tint = palette.textSecondary,
                                         modifier = Modifier.size(13.dp)
                                     )
                                     Spacer(modifier = Modifier.width(3.dp))
-                                    Text(
-                                        text = "换个问题",
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.Medium,
-                                        color = palette.accentBlue
-                                    )
+                                    Text("换个话题", fontSize = 11.sp, color = palette.textSecondary)
                                 }
                             }
                             Spacer(modifier = Modifier.height(8.dp))
                             Text(
                                 text = currentQuestion,
-                                fontSize = 17.sp,
+                                fontSize = 16.sp,
                                 fontWeight = FontWeight.Bold,
                                 color = palette.textPrimary,
-                                lineHeight = 25.sp
+                                lineHeight = 24.sp
                             )
                         }
                     }
-                    // Subtle speech-bubble tail triangle
                     Canvas(
                         modifier = Modifier
-                            .padding(start = 16.dp)
+                            .padding(start = 18.dp)
                             .size(width = 14.dp, height = 8.dp)
                     ) {
                         val tail = Path().apply {
                             moveTo(0f, 0f)
                             lineTo(size.width, 0f)
-                            lineTo(size.width * 0.2f, size.height)
+                            lineTo(size.width * 0.25f, size.height)
                             close()
                         }
-                        drawPath(
-                            path = tail,
-                            color = if (palette.isDark) Color(0xFF1E3252) else Color(0xFFE8F4FF)
-                        )
+                        drawPath(path = tail, color = Color(0xFF24252E))
                     }
                 }
 
-                Spacer(modifier = Modifier.height(8.dp))
+                Spacer(modifier = Modifier.height(6.dp))
                 Text(
                     text = topic.subtitleHint,
-                    fontSize = 12.sp,
-                    color = palette.textSecondary,
-                    lineHeight = 17.sp
+                    fontSize = 11.sp,
+                    color = palette.textMuted,
+                    textAlign = TextAlign.Center
+                )
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                // Wide Red & Gold Studio Waveform
+                SymmetricHarmonicWaveform(
+                    level = liveRms,
+                    isActive = isRecording,
+                    accentColor = palette.neteaseRedBright,
+                    secondaryColor = palette.vinylGold,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(54.dp)
                 )
 
                 if (gentleTip != null) {
-                    Spacer(modifier = Modifier.height(10.dp))
+                    Spacer(modifier = Modifier.height(8.dp))
                     Text(
                         text = gentleTip ?: "",
                         fontSize = 12.sp,
-                        fontWeight = FontWeight.Medium,
-                        color = palette.warningAmber
+                        color = palette.vinylGold
                     )
                 }
 
-                Spacer(modifier = Modifier.height(22.dp))
+                Spacer(modifier = Modifier.height(18.dp))
 
-                // Glowing Iridescent Liquid-Glass Speak Capsule (matching Style A right screen)
-                IridescentSpeakCapsule(
-                    isRecording = isRecording,
-                    liveRms = liveRms,
-                    idleLabel = "按住随口答 · 或轻点说完自动停",
-                    recordingLabel = if (voicedSec >= 0.8f) {
-                        "已捕捉自然声纹 · 松手或停顿即完成"
-                    } else {
-                        "正在聆听你说话…"
-                    },
-                    onStartCapture = {
-                        if (!isRecording) {
-                            val deferred = CompletableDeferred<Unit>()
-                            stopDeferred = deferred
-                            isRecording = true
-                            gentleTip = null
-                            voicedSec = 0f
-                            scope.launch {
-                                val res = VoiceprintManager.captureInteractiveUtterance(
-                                    context = context,
-                                    stopSignal = deferred,
-                                    autoStopOnSilence = true,
-                                    multiScale = true,
-                                    onLiveFeedback = { _, rms, vSec ->
-                                        liveRms = rms
-                                        voicedSec = vSec
-                                    }
-                                )
-                                isRecording = false
-                                liveRms = 0f
-                                when (res) {
-                                    is VoiceCaptureResult.Success -> {
-                                        collectedEmbeddings.addAll(res.embeddings)
-                                        if (stepIdx < CASUAL_CHAT_TOPICS.lastIndex) {
-                                            stepIdx++
-                                            questionVariant = 0
-                                        } else {
-                                            onFinished(collectedEmbeddings.toList())
+                // Glowing NetEase Coral-Red Speak Capsule (Press-to-Talk OR Tap Auto-Stop!)
+                Box(
+                    contentAlignment = Alignment.Center,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(54.dp)
+                        .shadow(
+                            elevation = if (isRecording) 22.dp else 12.dp,
+                            shape = RoundedCornerShape(50),
+                            ambientColor = palette.neteaseRed,
+                            spotColor = palette.neteaseRed
+                        )
+                        .clip(RoundedCornerShape(50))
+                        .background(
+                            brush = Brush.horizontalGradient(
+                                colors = if (isRecording) {
+                                    listOf(Color(0xFFFF786E), palette.neteaseRed)
+                                } else {
+                                    listOf(Color(0xFFF04A46), Color(0xFFD63232))
+                                }
+                            )
+                        )
+                        .border(1.dp, Color.White.copy(alpha = 0.30f), RoundedCornerShape(50))
+                        .pointerInput(isRecording) {
+                            detectTapGestures(
+                                onPress = {
+                                    if (!isRecording) {
+                                        val downAt = SystemClock.elapsedRealtime()
+                                        val deferred = CompletableDeferred<Unit>()
+                                        stopDeferred = deferred
+                                        isRecording = true
+                                        gentleTip = null
+                                        voicedSec = 0f
+                                        scope.launch {
+                                            val res = VoiceprintManager.captureInteractiveUtterance(
+                                                context = context,
+                                                stopSignal = deferred,
+                                                autoStopOnSilence = true,
+                                                multiScale = true,
+                                                onLiveFeedback = { _, rms, vSec ->
+                                                    liveRms = rms
+                                                    voicedSec = vSec
+                                                }
+                                            )
+                                            isRecording = false
+                                            liveRms = 0f
+                                            when (res) {
+                                                is VoiceCaptureResult.Success -> {
+                                                    collectedEmbeddings.addAll(res.embeddings)
+                                                    if (stepIdx < CASUAL_CHAT_TOPICS.lastIndex) {
+                                                        stepIdx++
+                                                        questionVariant = 0
+                                                    } else {
+                                                        onFinished(collectedEmbeddings.toList())
+                                                    }
+                                                }
+                                                is VoiceCaptureResult.TooQuiet -> {
+                                                    gentleTip = "刚才声音稍微有点短，随便多聊半句话就好啦～"
+                                                }
+                                                is VoiceCaptureResult.Error -> {
+                                                    gentleTip = res.message
+                                                }
+                                            }
                                         }
-                                    }
-                                    is VoiceCaptureResult.TooQuiet -> {
-                                        gentleTip = "刚才声音有点短，像跟熟人唠嗑一样随便多说几个字就好啦～"
-                                    }
-                                    is VoiceCaptureResult.Error -> {
-                                        gentleTip = res.message
+                                        val released = tryAwaitRelease()
+                                        if (released && (SystemClock.elapsedRealtime() - downAt) >= 380L) {
+                                            deferred.complete(Unit)
+                                        }
+                                    } else {
+                                        stopDeferred?.complete(Unit)
                                     }
                                 }
-                            }
-                        }
-                    },
-                    onFinishCapture = {
-                        stopDeferred?.complete(Unit)
-                    }
-                )
-
-                Spacer(modifier = Modifier.height(10.dp))
-
-                Row(
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    TextButton(
-                        onClick = onDismiss,
-                        enabled = !isRecording
-                    ) {
-                        Text("稍后再录", fontSize = 12.sp, color = palette.textMuted)
-                    }
-
-                    if (collectedEmbeddings.isNotEmpty() && !isRecording) {
-                        TextButton(
-                            onClick = { onFinished(collectedEmbeddings.toList()) }
-                        ) {
-                            Text(
-                                text = "已录 ${stepIdx} 题，直接保存启用 ›",
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = palette.accentBlue
                             )
                         }
+                ) {
+                    Text(
+                        text = when {
+                            !isRecording -> "按住说话 · 或轻点免提录入声纹"
+                            voicedSec >= 0.85f -> "已捕捉真实声线 · 松手或停顿即完成"
+                            else -> "正在录音棚收音…"
+                        },
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White
+                    )
+                }
+
+                if (collectedEmbeddings.isNotEmpty() && !isRecording) {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    TextButton(onClick = { onFinished(collectedEmbeddings.toList()) }) {
+                        Text(
+                            text = "已采集 $stepIdx 段，直接完成锁定 ›",
+                            fontSize = 12.sp,
+                            color = palette.vinylGold
+                        )
                     }
+                } else {
+                    Spacer(modifier = Modifier.height(10.dp))
                 }
             }
         }
     }
 }
 
-/**
- * Dual-gesture glowing iridescent glass speak pill matching the Style A mockup:
- * - Press & hold (>= 0.38s): finishes immediately when finger lifts (WeChat voice style).
- * - Quick tap (< 0.38s): hands-free mode, finishes automatically after 0.72s silence pause or on second tap!
- */
 @Composable
-private fun IridescentSpeakCapsule(
-    isRecording: Boolean,
-    liveRms: Float,
-    idleLabel: String,
-    recordingLabel: String,
-    onStartCapture: () -> Unit,
-    onFinishCapture: () -> Unit
-) {
-    val palette = LocalOriginPalette.current
-    val pillShape = RoundedCornerShape(50)
-
-    val capsuleBrush = if (isRecording) {
-        Brush.horizontalGradient(
-            colors = listOf(
-                Color(0xFF38BDF8),
-                Color(0xFF818CF8),
-                Color(0xFFF472B6)
-            )
-        )
-    } else {
-        Brush.horizontalGradient(
-            colors = if (palette.isDark) {
-                listOf(
-                    Color(0xFF1E3A5F),
-                    Color(0xFF2B2D5C),
-                    Color(0xFF1E3A5F)
-                )
-            } else {
-                listOf(
-                    Color(0xFFDFF2FF),
-                    Color(0xFFEDE9FE),
-                    Color(0xFFE0F7FA)
-                )
-            }
-        )
-    }
-
-    val contentTint = if (isRecording) {
-        Color.White
-    } else {
-        palette.accentBlue
-    }
-
+private fun StudioCondenserMicEmblem(isRecording: Boolean) {
+    val palette = LocalVinylPalette.current
     Box(
         contentAlignment = Alignment.Center,
         modifier = Modifier
-            .fillMaxWidth()
-            .height(62.dp)
+            .size(72.dp)
             .shadow(
                 elevation = if (isRecording) 18.dp else 8.dp,
-                shape = pillShape,
-                ambientColor = palette.accentCyan.copy(alpha = 0.35f),
-                spotColor = palette.accentLavender.copy(alpha = 0.45f)
+                shape = CircleShape,
+                ambientColor = palette.vinylGold,
+                spotColor = palette.neteaseRed
             )
-            .clip(pillShape)
-            .background(brush = capsuleBrush)
+            .clip(CircleShape)
+            .background(Color(0xFF2B201D))
             .border(
-                BorderStroke(
-                    width = 1.4.dp,
-                    color = Color.White.copy(alpha = if (isRecording) 0.85f else 0.90f)
+                1.4.dp,
+                Brush.linearGradient(
+                    colors = listOf(palette.vinylGold, palette.neteaseRed.copy(alpha = 0.65f))
                 ),
-                pillShape
+                CircleShape
             )
-            .pointerInput(isRecording) {
-                detectTapGestures(
-                    onPress = {
-                        if (!isRecording) {
-                            val downAt = SystemClock.elapsedRealtime()
-                            onStartCapture()
-                            val released = tryAwaitRelease()
-                            val heldMs = SystemClock.elapsedRealtime() - downAt
-                            if (released && heldMs >= 380L) {
-                                onFinishCapture()
-                            }
-                        } else {
-                            onFinishCapture()
-                        }
-                    }
-                )
-            }
-            .padding(horizontal = 18.dp)
     ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.Center
-        ) {
-            WaveBarsIcon(
-                tint = contentTint.copy(alpha = if (isRecording) 0.95f else 0.55f),
-                level = if (isRecording) (liveRms * 8f).coerceIn(0.25f, 1f) else 0.25f,
-                size = 20.dp
+        Canvas(modifier = Modifier.size(34.dp)) {
+            val w = size.width
+            val h = size.height
+            val gold = palette.vinylGold
+            // Vintage condenser mic capsule with horizontal grille lines
+            val capW = w * 0.36f
+            val capH = h * 0.50f
+            drawRoundRect(
+                color = gold,
+                topLeft = Offset((w - capW) / 2f, h * 0.08f),
+                size = Size(capW, capH),
+                cornerRadius = CornerRadius(capW / 2f, capW / 2f),
+                style = Stroke(width = 1.8.dp.toPx())
             )
-            Spacer(modifier = Modifier.width(10.dp))
-            MicCanvasIcon(tint = contentTint, size = 22.dp)
-            Spacer(modifier = Modifier.width(8.dp))
-            Text(
-                text = if (isRecording) recordingLabel else idleLabel,
-                fontSize = 13.sp,
-                fontWeight = FontWeight.Bold,
-                color = contentTint
-            )
-            Spacer(modifier = Modifier.width(10.dp))
-            WaveBarsIcon(
-                tint = contentTint.copy(alpha = if (isRecording) 0.95f else 0.55f),
-                level = if (isRecording) (liveRms * 8f).coerceIn(0.25f, 1f) else 0.25f,
-                size = 20.dp
-            )
-        }
-    }
-}
-
-@OptIn(ExperimentalLayoutApi::class)
-@Composable
-private fun CatchphrasePillsCard(uiState: MonitorUiState) {
-    val palette = LocalOriginPalette.current
-    val context = LocalContext.current
-    var inputWord by remember { mutableStateOf("") }
-
-    val existingSet = remember(uiState.keywords) {
-        uiState.keywords.map { it.word }.toSet()
-    }
-    val remainingSuggestions = remember(existingSet) {
-        QUICK_SUGGESTIONS.filterNot { it in existingSet }
-    }
-
-    OriginGlassCard(modifier = Modifier.fillMaxWidth()) {
-        Text(
-            text = "盯防口头禅胶囊",
-            fontSize = 16.sp,
-            fontWeight = FontWeight.Bold,
-            color = palette.textPrimary
-        )
-        Text(
-            text = "随时增删想戒掉的口头禅，监听中实时热更新",
-            fontSize = 12.sp,
-            color = palette.textSecondary
-        )
-
-        Spacer(modifier = Modifier.height(14.dp))
-
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            OutlinedTextField(
-                value = inputWord,
-                onValueChange = { inputWord = it },
-                placeholder = { Text("输入新口头禅，如：那个", fontSize = 13.sp) },
-                singleLine = true,
-                shape = RoundedCornerShape(50),
-                modifier = Modifier.weight(1f)
-            )
-            Spacer(modifier = Modifier.width(8.dp))
-            Button(
-                onClick = {
-                    if (MonitorStateStore.addKeyword(inputWord)) {
-                        inputWord = ""
-                    } else {
-                        Toast.makeText(context, "请输入不重复的口头禅", Toast.LENGTH_SHORT).show()
-                    }
-                },
-                shape = RoundedCornerShape(50),
-                modifier = Modifier.height(52.dp)
-            ) {
-                Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
-                Spacer(modifier = Modifier.width(2.dp))
-                Text("添加", fontWeight = FontWeight.Bold)
-            }
-        }
-
-        if (remainingSuggestions.isNotEmpty()) {
-            Spacer(modifier = Modifier.height(12.dp))
-            FlowRow(
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                remainingSuggestions.forEach { suggestion ->
-                    Box(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(50))
-                            .background(palette.cardSubtleSurface)
-                            .border(
-                                width = 1.dp,
-                                color = Color.White.copy(alpha = if (palette.isDark) 0.14f else 0.75f),
-                                shape = RoundedCornerShape(50)
-                            )
-                            .clickable { MonitorStateStore.addKeyword(suggestion) }
-                            .padding(horizontal = 14.dp, vertical = 7.dp)
-                    ) {
-                        Text(
-                            text = "+ $suggestion",
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = palette.accentBlue
-                        )
-                    }
-                }
-            }
-        }
-
-        Spacer(modifier = Modifier.height(14.dp))
-
-        uiState.keywords.forEachIndexed { index, item ->
-            if (index > 0) {
-                HorizontalDivider(
-                    color = palette.cardBorder.copy(alpha = 0.45f),
-                    modifier = Modifier.padding(vertical = 6.dp)
+            for (g in 1..3) {
+                val gy = h * (0.16f + g * 0.09f)
+                drawLine(
+                    color = gold.copy(alpha = 0.65f),
+                    start = Offset(w * 0.36f, gy),
+                    end = Offset(w * 0.64f, gy),
+                    strokeWidth = 1.2.dp.toPx()
                 )
             }
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 4.dp)
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = "「${item.word}」",
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = if (item.enabled) palette.textPrimary else palette.textMuted
-                    )
-                    Text(
-                        text = "今日 ${item.todayCount} 次 · 累计 ${item.totalCount} 次",
-                        fontSize = 12.sp,
-                        color = palette.textSecondary
-                    )
-                }
-                Switch(
-                    checked = item.enabled,
-                    onCheckedChange = { checked ->
-                        MonitorStateStore.toggleKeyword(item.word, checked)
-                    }
-                )
-                IconButton(onClick = { MonitorStateStore.removeKeyword(item.word) }) {
-                    Icon(
-                        imageVector = Icons.Default.Delete,
-                        contentDescription = "删除",
-                        tint = palette.textMuted
-                    )
-                }
-            }
+            drawArc(
+                color = gold,
+                startAngle = 0f,
+                sweepAngle = 180f,
+                useCenter = false,
+                topLeft = Offset(w * 0.22f, h * 0.26f),
+                size = Size(w * 0.56f, h * 0.48f),
+                style = Stroke(width = 2.dp.toPx(), cap = StrokeCap.Round)
+            )
+            drawLine(
+                color = gold,
+                start = Offset(w * 0.5f, h * 0.74f),
+                end = Offset(w * 0.5f, h * 0.90f),
+                strokeWidth = 2.dp.toPx(),
+                cap = StrokeCap.Round
+            )
+            drawLine(
+                color = gold,
+                start = Offset(w * 0.32f, h * 0.90f),
+                end = Offset(w * 0.68f, h * 0.90f),
+                strokeWidth = 2.dp.toPx(),
+                cap = StrokeCap.Round
+            )
         }
     }
 }

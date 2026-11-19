@@ -8,16 +8,19 @@ import android.os.Build
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.Crossfade
-import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.tween
-import androidx.compose.foundation.BorderStroke
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
@@ -30,15 +33,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBarsPadding
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Person
-import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material3.Icon
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -48,8 +43,6 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -57,12 +50,15 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.selfuse.catchphraseguard.ui.AuraMeshBackdrop
 import com.selfuse.catchphraseguard.ui.CatchphraseOriginTheme
-import com.selfuse.catchphraseguard.ui.LocalOriginPalette
-import com.selfuse.catchphraseguard.ui.MicCanvasIcon
+import com.selfuse.catchphraseguard.ui.ChartBarsTabIcon
+import com.selfuse.catchphraseguard.ui.FaderSlidersTabIcon
+import com.selfuse.catchphraseguard.ui.LocalVinylPalette
+import com.selfuse.catchphraseguard.ui.MiniVinylPlayerBar
 import com.selfuse.catchphraseguard.ui.RadarConsoleTab
 import com.selfuse.catchphraseguard.ui.StatsAndSettingsTab
+import com.selfuse.catchphraseguard.ui.VinylAmbientBackdrop
+import com.selfuse.catchphraseguard.ui.VinylDiscTabIcon
 import com.selfuse.catchphraseguard.ui.VoiceprintAndWordsTab
 
 class MainActivity : ComponentActivity() {
@@ -70,11 +66,15 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         MonitorStateStore.ensureInitialized(applicationContext)
         NotificationHelper.ensureChannels(applicationContext)
-        enableEdgeToEdge()
+
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
+            navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT)
+        )
 
         setContent {
             CatchphraseOriginTheme {
-                CatchphraseAuraShell()
+                CatchphraseNetEaseVinylShell()
             }
         }
     }
@@ -86,8 +86,9 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-private fun CatchphraseAuraShell() {
+private fun CatchphraseNetEaseVinylShell() {
     val context = LocalContext.current
+    val palette = LocalVinylPalette.current
     val uiState by MonitorStateStore.uiState.collectAsStateWithLifecycle()
     var currentTab by rememberSaveable { mutableIntStateOf(0) }
 
@@ -100,7 +101,7 @@ private fun CatchphraseAuraShell() {
         if (micGranted) {
             startMonitorService(context)
         } else {
-            Toast.makeText(context, "需要麦克风权限才能监听口头禅", Toast.LENGTH_LONG).show()
+            Toast.makeText(context, "需要麦克风权限才能开启黑胶监听", Toast.LENGTH_LONG).show()
         }
     }
 
@@ -114,245 +115,167 @@ private fun CatchphraseAuraShell() {
         }
     }
 
+    val handleToggleMonitoring: () -> Unit = {
+        if (uiState.isRunning) {
+            stopMonitorService(context)
+        } else {
+            val missing = mutableListOf<String>()
+            if (!hasPermission(context, Manifest.permission.RECORD_AUDIO)) {
+                missing.add(Manifest.permission.RECORD_AUDIO)
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                !hasPermission(context, Manifest.permission.POST_NOTIFICATIONS)
+            ) {
+                missing.add(Manifest.permission.POST_NOTIFICATIONS)
+            }
+            if (missing.isEmpty()) {
+                startMonitorService(context)
+            } else {
+                startServicePermissionLauncher.launch(missing.toTypedArray())
+            }
+        }
+    }
+
+    val handleTestPush: () -> Unit = {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            !hasPermission(context, Manifest.permission.POST_NOTIFICATIONS)
+        ) {
+            testPushPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        } else {
+            sendTestPush(context, uiState.settings)
+        }
+    }
+
     Box(modifier = Modifier.fillMaxSize()) {
-        // Full-bleed ethereal pastel mesh aurora canvas
-        AuraMeshBackdrop()
+        // Full-screen NetEase Dark Crimson-Obsidian Vinyl Backdrop
+        VinylAmbientBackdrop(isRunning = uiState.isRunning)
 
         Column(modifier = Modifier.fillMaxSize()) {
-            AuraMinimalHeader(
-                currentTab = currentTab,
-                isRunning = uiState.isRunning
-            )
-
             Box(modifier = Modifier.weight(1f)) {
                 Crossfade(
                     targetState = currentTab,
-                    animationSpec = tween(durationMillis = 240),
-                    label = "auraTabCrossfade"
+                    animationSpec = tween(durationMillis = 220),
+                    label = "vinylPageCrossfade"
                 ) { tab ->
                     when (tab) {
                         0 -> RadarConsoleTab(
                             uiState = uiState,
-                            onToggleMonitoring = {
-                                if (uiState.isRunning) {
-                                    stopMonitorService(context)
-                                } else {
-                                    val missing = mutableListOf<String>()
-                                    if (!hasPermission(context, Manifest.permission.RECORD_AUDIO)) {
-                                        missing.add(Manifest.permission.RECORD_AUDIO)
-                                    }
-                                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-                                        !hasPermission(context, Manifest.permission.POST_NOTIFICATIONS)
-                                    ) {
-                                        missing.add(Manifest.permission.POST_NOTIFICATIONS)
-                                    }
-                                    if (missing.isEmpty()) {
-                                        startMonitorService(context)
-                                    } else {
-                                        startServicePermissionLauncher.launch(missing.toTypedArray())
-                                    }
-                                }
-                            },
-                            onJumpToVoiceprint = { currentTab = 1 }
+                            onToggleMonitoring = handleToggleMonitoring,
+                            onJumpToVoiceprint = { currentTab = 1 },
+                            onSendTestPush = handleTestPush
                         )
 
                         1 -> VoiceprintAndWordsTab(uiState = uiState)
 
                         else -> StatsAndSettingsTab(
                             uiState = uiState,
-                            onSendTestPush = {
-                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-                                    !hasPermission(context, Manifest.permission.POST_NOTIFICATIONS)
-                                ) {
-                                    testPushPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-                                } else {
-                                    sendTestPush(context, uiState.settings)
-                                }
-                            }
+                            onSendTestPush = handleTestPush
                         )
                     }
                 }
             }
-        }
 
-        // Floating Frosted-Glass Capsule Bottom Dock (matching Style A mockup)
-        FloatingAuraGlassDock(
-            currentTab = currentTab,
-            onSelectTab = { currentTab = it },
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .navigationBarsPadding()
-                .padding(bottom = 14.dp)
-        )
+            // Persistent NetEase Mini Vinyl Player Bar on Tabs 1 & 2
+            AnimatedVisibility(
+                visible = currentTab != 0,
+                enter = fadeIn(tween(180)) + slideInVertically(tween(220)) { it / 2 },
+                exit = fadeOut(tween(150)) + slideOutVertically(tween(180)) { it / 2 }
+            ) {
+                MiniVinylPlayerBar(
+                    uiState = uiState,
+                    onOpenTurntable = { currentTab = 0 },
+                    onTogglePlay = handleToggleMonitoring,
+                    modifier = Modifier.padding(bottom = 8.dp, top = 4.dp)
+                )
+            }
+
+            // NetEase Dark Vinyl 3-Tab Bottom Navigation Bar
+            NetEaseBottomTabBar(
+                currentTab = currentTab,
+                onSelectTab = { currentTab = it }
+            )
+        }
     }
 }
 
 @Composable
-private fun AuraMinimalHeader(
+private fun NetEaseBottomTabBar(
     currentTab: Int,
-    isRunning: Boolean
+    onSelectTab: (Int) -> Unit
 ) {
-    val palette = LocalOriginPalette.current
-    val title = when (currentTab) {
-        0 -> "Voice Radar"
-        1 -> "Voiceprint Studio"
-        else -> "Insights & Studio"
-    }
-    val subtitle = when (currentTab) {
-        0 -> "口头禅流光声呐 · v3.1"
-        1 -> "自然闲聊声纹与词库"
-        else -> "统计看板与守护偏好"
-    }
+    val palette = LocalVinylPalette.current
 
     Column(
-        horizontalAlignment = Alignment.CenterHorizontally,
         modifier = Modifier
             .fillMaxWidth()
-            .statusBarsPadding()
-            .padding(top = 12.dp, bottom = 6.dp)
+            .background(palette.bottomBarSurface)
+            .navigationBarsPadding()
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                text = title,
-                fontSize = 19.sp,
-                fontWeight = FontWeight.Bold,
-                color = palette.textPrimary
-            )
-            Spacer(modifier = Modifier.width(7.dp))
-            Box(
-                modifier = Modifier
-                    .size(8.dp)
-                    .shadow(
-                        elevation = if (isRunning) 6.dp else 0.dp,
-                        shape = CircleShape,
-                        ambientColor = palette.accentCyan,
-                        spotColor = palette.accentCyan
-                    )
-                    .clip(CircleShape)
-                    .background(
-                        if (isRunning) palette.accentCyan else palette.textMuted.copy(alpha = 0.45f)
-                    )
-            )
-        }
-        Spacer(modifier = Modifier.height(2.dp))
-        Text(
-            text = subtitle,
-            fontSize = 11.sp,
-            color = palette.textSecondary
-        )
-    }
-}
+        HorizontalDivider(color = Color(0xFF22242E))
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceAround,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(58.dp)
+        ) {
+            NetEaseTabItem(
+                selected = currentTab == 0,
+                label = "监听",
+                onClick = { onSelectTab(0) }
+            ) { tint ->
+                VinylDiscTabIcon(tint = tint, selected = currentTab == 0, size = 23.dp)
+            }
 
-@Composable
-private fun FloatingAuraGlassDock(
-    currentTab: Int,
-    onSelectTab: (Int) -> Unit,
-    modifier: Modifier = Modifier
-) {
-    val palette = LocalOriginPalette.current
-    val dockShape = RoundedCornerShape(36.dp)
+            NetEaseTabItem(
+                selected = currentTab == 1,
+                label = "声纹榜",
+                onClick = { onSelectTab(1) }
+            ) { tint ->
+                ChartBarsTabIcon(tint = tint, size = 23.dp)
+            }
 
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(16.dp),
-        modifier = modifier
-            .shadow(
-                elevation = 20.dp,
-                shape = dockShape,
-                ambientColor = palette.glassShadowColor,
-                spotColor = palette.glassShadowColor
-            )
-            .clip(dockShape)
-            .background(palette.navBarSurface)
-            .border(BorderStroke(1.3.dp, palette.glassRimBrush), dockShape)
-            .padding(horizontal = 16.dp, vertical = 10.dp)
-    ) {
-        DockBubbleItem(
-            selected = currentTab == 0,
-            label = "声呐",
-            onClick = { onSelectTab(0) }
-        ) { tint ->
-            MicCanvasIcon(tint = tint, size = 21.dp)
-        }
-
-        DockBubbleItem(
-            selected = currentTab == 1,
-            label = "声纹",
-            onClick = { onSelectTab(1) }
-        ) { tint ->
-            Icon(
-                imageVector = Icons.Default.Person,
-                contentDescription = "声纹与词库",
-                tint = tint,
-                modifier = Modifier.size(21.dp)
-            )
-        }
-
-        DockBubbleItem(
-            selected = currentTab == 2,
-            label = "统计",
-            onClick = { onSelectTab(2) }
-        ) { tint ->
-            Icon(
-                imageVector = Icons.Default.Settings,
-                contentDescription = "统计与设置",
-                tint = tint,
-                modifier = Modifier.size(21.dp)
-            )
+            NetEaseTabItem(
+                selected = currentTab == 2,
+                label = "调音台",
+                onClick = { onSelectTab(2) }
+            ) { tint ->
+                FaderSlidersTabIcon(tint = tint, size = 23.dp)
+            }
         }
     }
 }
 
 @Composable
-private fun DockBubbleItem(
+private fun NetEaseTabItem(
     selected: Boolean,
     label: String,
     onClick: () -> Unit,
     iconContent: @Composable (Color) -> Unit
 ) {
-    val palette = LocalOriginPalette.current
+    val palette = LocalVinylPalette.current
+    val tint = if (selected) palette.neteaseRed else palette.textMuted
     val interactionSource = remember { MutableInteractionSource() }
 
-    val bgTarget = if (selected) {
-        if (palette.isDark) Color(0xFF1E3A5F) else Color(0xFFE0F2FE)
-    } else {
-        Color.White.copy(alpha = if (palette.isDark) 0.05f else 0.45f)
-    }
-    val bubbleBg by animateColorAsState(
-        targetValue = bgTarget,
-        animationSpec = tween(durationMillis = 220),
-        label = "dockBubbleBg"
-    )
-    val iconTint = if (selected) palette.accentBlue else palette.textSecondary
-
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
         modifier = Modifier
-            .height(44.dp)
-            .clip(RoundedCornerShape(50))
-            .background(bubbleBg)
-            .border(
-                width = 1.dp,
-                color = Color.White.copy(alpha = if (selected) 0.85f else 0.35f),
-                shape = RoundedCornerShape(50)
-            )
             .clickable(
                 interactionSource = interactionSource,
                 indication = null,
                 onClick = onClick
             )
-            .padding(horizontal = if (selected) 16.dp else 13.dp)
+            .padding(horizontal = 24.dp, vertical = 4.dp)
     ) {
-        iconContent(iconTint)
-        if (selected) {
-            Spacer(modifier = Modifier.width(6.dp))
-            Text(
-                text = label,
-                fontSize = 12.sp,
-                fontWeight = FontWeight.Bold,
-                color = palette.accentBlue
-            )
-        }
+        iconContent(tint)
+        Spacer(modifier = Modifier.height(3.dp))
+        Text(
+            text = label,
+            fontSize = 10.sp,
+            fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+            color = tint
+        )
     }
 }
 
@@ -384,5 +307,5 @@ private fun sendTestPush(context: Context, settings: MonitorSettings) {
         vibrateEnabled = settings.vibrateEnabled,
         similarity = 0.82f
     )
-    Toast.makeText(context, "已发送测试推送消息", Toast.LENGTH_SHORT).show()
+    Toast.makeText(context, "已发送测试强提醒推送", Toast.LENGTH_SHORT).show()
 }

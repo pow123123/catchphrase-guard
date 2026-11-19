@@ -65,26 +65,27 @@ jobs:
       - name: Build signed Release APK
         run: |
           gradle assembleRelease --no-daemon --stacktrace
-          cp app/build/outputs/apk/release/app-release.apk "CatchphraseGuard-v3.1.${GITHUB_RUN_NUMBER}.apk"
-          ls -lh "CatchphraseGuard-v3.1.${GITHUB_RUN_NUMBER}.apk"
+          cp app/build/outputs/apk/release/app-release.apk "CatchphraseGuard-v4.0.${GITHUB_RUN_NUMBER}.apk"
+          ls -lh "CatchphraseGuard-v4.0.${GITHUB_RUN_NUMBER}.apk"
 
       - name: Upload APK to Actions Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: CatchphraseGuard-APK
-          path: CatchphraseGuard-v3.1.${{ github.run_number }}.apk
+          path: CatchphraseGuard-v4.0.${{ github.run_number }}.apk
           if-no-files-found: error
 
       - name: Publish APK to GitHub Releases (1-click mobile download)
         continue-on-error: true
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v3.1.${{ github.run_number }}
-          name: "口头禅猎手 v3.1.${{ github.run_number }}（通知推送图标同步升级）"
+          tag_name: v4.0.${{ github.run_number }}
+          name: "口头禅猎手 v4.0.${{ github.run_number }}（全页面网易云暗夜黑胶 + 鲸云调音台重构版）"
           body: |
-            ### v3.1 推送消息与状态栏图标同步换新
-            - **推送横幅彩色大图标 (`setLargeIcon`)**：消息推送与常驻通知均嵌入圆角精修版「暖调金属陶瓷声波图标」。
-            - **状态栏五道声波小图标 (`ic_wave_notify`) + 珊瑚橙品牌色**：替换掉旧版麦克风小图标，全链路视觉统一。
-            - *小贴士：如果 vivo OriginOS 顶部横幅最左上角极小的系统应用角标因覆盖安装仍缓存旧图标，重启一次手机或卸载旧版重装即可彻底刷新系统图标缓存。*
-          files: CatchphraseGuard-v3.1.${{ github.run_number }}.apk
+            ### v4.0 全页面网易云音乐风交互重构
+            - **① 黑胶唱针监听台**：拟真黑胶唱片微纹路反光旋转 + 机械银色唱臂起落 + 鲸云音效律动外环 + 三行滚动歌词珊瑚红高亮 + 抓包热评抽屉。
+            - **② 声纹歌单热榜**：黑胶 VIP 黑金声纹卡 + 零念稿录音棚暗色弹窗 + 按触发频次实时排行的「热词盯防榜（01/02/03）」。
+            - **③ 鲸云声学调音台与设置中心**：年度听歌报告风黑金红双战报卡 + 2×2 发光音效插件矩阵（彻底告别原生粗糙开关）+ 流光灵敏度推子 + 凹槽冷却分段器。
+            - **全局悬浮迷你黑胶条**：在声纹榜与调音台页面常驻底部迷你黑胶播放条，随时看实时听写、一键启停。
+          files: CatchphraseGuard-v4.0.${{ github.run_number }}.apk
           make_latest: true
