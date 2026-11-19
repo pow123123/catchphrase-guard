@@ -34,12 +34,12 @@ object VoiceprintManager {
     private fun getOrCreateExtractor(context: Context): SpeakerEmbeddingExtractor {
         synchronized(lock) {
             extractor?.let { return it }
-            val config = SpeakerEmbeddingExtractorConfig().apply {
-                model = "model/speaker.onnx"
-                numThreads = 2
+            val config = SpeakerEmbeddingExtractorConfig(
+                model = "model/speaker.onnx",
+                numThreads = 2,
+                debug = false,
                 provider = "cpu"
-                debug = false
-            }
+            )
             val created = SpeakerEmbeddingExtractor(context.applicationContext.assets, config)
             extractor = created
             return created
