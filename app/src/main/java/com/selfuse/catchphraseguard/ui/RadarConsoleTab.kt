@@ -1,5 +1,6 @@
 package com.selfuse.catchphraseguard.ui
 
+import android.widget.Toast
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
@@ -9,8 +10,11 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
@@ -37,16 +41,21 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import android.widget.Toast
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -54,6 +63,7 @@ import com.selfuse.catchphraseguard.HitRecord
 import com.selfuse.catchphraseguard.MonitorStateStore
 import com.selfuse.catchphraseguard.MonitorUiState
 import com.selfuse.catchphraseguard.PulseEventType
+import com.selfuse.catchphraseguard.R
 import kotlinx.coroutines.delay
 import kotlin.math.roundToInt
 
@@ -64,9 +74,8 @@ fun RadarConsoleTab(
     onJumpToVoiceprint: () -> Unit
 ) {
     val palette = LocalOriginPalette.current
-    var selectedFilter by remember { mutableIntStateOf(0) } // 0=All, 1=Self, 2=Filtered
+    var selectedFilter by remember { mutableIntStateOf(0) }
 
-    // Keep track of brief 3-second color flash after self-hit or filtered-other event
     var activeFlashType by remember { mutableStateOf(PulseEventType.NONE) }
     LaunchedEffect(uiState.lastEventTimestampMs, uiState.lastEventPulseType) {
         if (uiState.lastEventTimestampMs > 0L && uiState.lastEventPulseType != PulseEventType.NONE) {
@@ -81,84 +90,69 @@ fun RadarConsoleTab(
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(horizontal = 18.dp, vertical = 12.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp)
+        contentPadding = PaddingValues(
+            start = 20.dp,
+            end = 20.dp,
+            top = 6.dp,
+            bottom = 112.dp
+        ),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(18.dp)
     ) {
         item {
-            VoiceprintStatusBanner(
+            VoiceprintAuraPill(
                 uiState = uiState,
                 onClick = onJumpToVoiceprint
             )
         }
 
         item {
-            OriginGlassCard(
-                modifier = Modifier.fillMaxWidth(),
-                contentPadding = PaddingValues(vertical = 22.dp, horizontal = 18.dp)
+            // Open-air 3D Iridescent Liquid Glass Sphere stage (matching Style A mockup)
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier.fillMaxWidth()
             ) {
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    val todaySelfTotal = uiState.keywords.sumOf { it.todayCount }
-                    Row(
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Column {
-                            Text(
-                                text = "实时声呐监听",
-                                fontSize = 15.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = palette.textPrimary
-                            )
-                            Text(
-                                text = uiState.statusMessage,
-                                fontSize = 12.sp,
-                                color = palette.textSecondary
-                            )
-                        }
-                        OriginPillBadge(
-                            backgroundColor = palette.accentBlue.copy(alpha = if (palette.isDark) 0.22f else 0.12f)
-                        ) {
-                            Text(
-                                text = "今日自说 $todaySelfTotal 次",
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = palette.accentBlue
-                            )
-                        }
-                    }
+                AuraLiquidGlassOrb(
+                    isRunning = uiState.isRunning,
+                    micLevel = uiState.micLevel,
+                    flashType = activeFlashType,
+                    onToggle = onToggleMonitoring
+                )
 
-                    Spacer(modifier = Modifier.height(14.dp))
+                Spacer(modifier = Modifier.height(6.dp))
 
-                    AcousticBreathingOrb(
-                        isRunning = uiState.isRunning,
-                        micLevel = uiState.micLevel,
-                        flashType = activeFlashType,
-                        onToggle = onToggleMonitoring
-                    )
-
-                    Spacer(modifier = Modifier.height(12.dp))
-
-                    val activeWordList = uiState.keywords.filter { it.enabled }.map { it.word }
-                    Text(
-                        text = if (activeWordList.isEmpty()) {
-                            "当前未勾选盯防词 · 请前往「声纹与词库」开启"
-                        } else {
-                            "盯防词：${activeWordList.joinToString(" · ")}"
-                        },
-                        fontSize = 13.sp,
-                        color = palette.textSecondary
-                    )
-
-                    if (uiState.isRunning) {
-                        Spacer(modifier = Modifier.height(16.dp))
-                        LiveStreamPreviewBox(uiState = uiState)
-                    }
-                }
+                val todaySelfTotal = uiState.keywords.sumOf { it.todayCount }
+                val activeWordList = uiState.keywords.filter { it.enabled }.map { it.word }
+                Text(
+                    text = when {
+                        !uiState.isRunning -> "轻触水晶球 · 开启静默守护"
+                        activeFlashType == PulseEventType.SELF_HIT -> "刚刚抓到你说口头禅了！"
+                        activeFlashType == PulseEventType.OTHER_FILTERED -> "已静默拦截旁人声音"
+                        else -> "正在静默守护 · 轻触球体暂停"
+                    },
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = palette.textPrimary
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = if (activeWordList.isEmpty()) {
+                        "暂未开启盯防词 · 前往「声纹工坊」勾选"
+                    } else {
+                        "盯防「${activeWordList.joinToString(" · ")}」 · 今日自说 $todaySelfTotal 次"
+                    },
+                    fontSize = 12.sp,
+                    color = palette.textSecondary,
+                    textAlign = TextAlign.Center
+                )
             }
+        }
+
+        item {
+            FrostedWaveformCard(
+                uiState = uiState,
+                flashType = activeFlashType
+            )
         }
 
         item {
@@ -172,7 +166,7 @@ fun RadarConsoleTab(
 }
 
 @Composable
-private fun VoiceprintStatusBanner(
+private fun VoiceprintAuraPill(
     uiState: MonitorUiState,
     onClick: () -> Unit
 ) {
@@ -180,184 +174,194 @@ private fun VoiceprintStatusBanner(
     val enrolled = uiState.voiceprintProfile.isEnrolled
     val vpActive = enrolled && uiState.settings.voiceprintEnabled
 
-    val bgColor = when {
-        vpActive -> palette.shieldContainer
-        !enrolled -> palette.warningContainer
-        else -> palette.cardSubtleSurface
-    }
-    val accent = when {
+    val dotColor = when {
         vpActive -> palette.shieldEmerald
         !enrolled -> palette.warningAmber
-        else -> palette.textSecondary
+        else -> palette.textMuted
     }
-    val title = when {
-        vpActive -> "本人声纹护盾已激活 · 仅提醒你自己的声音"
-        !enrolled -> "尚未录入本人声纹 · 点此 10 秒开启专属识别"
-        else -> "本人声纹护盾已暂停 · 当前任何人说都会提醒"
-    }
-    val subtitle = when {
-        vpActive -> "今日已静默过滤他人语音 ${uiState.todayFilteredOthersCount} 次 · 阈值 ${(uiState.settings.voiceprintThreshold * 100).roundToInt()}%"
-        !enrolled -> "录入三段简短原声后，朋友或视频里的口头禅将自动静默屏蔽"
-        else -> "点击前往「声纹与词库」可重新打开声纹过滤开关"
+    val label = when {
+        vpActive -> "本人声纹护盾已开启 · 今日拦截他人 ${uiState.todayFilteredOthersCount} 次"
+        !enrolled -> "尚未建立本人声纹 · 点此 15 秒闲聊激活 ›"
+        else -> "声纹过滤已暂停 · 点此恢复仅本人提醒 ›"
     }
 
-    OriginGlassCard(
-        containerColor = bgColor,
-        borderColor = accent.copy(alpha = 0.28f),
-        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 13.dp),
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(24.dp))
-            .clickable(onClick = onClick)
-    ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            ShieldCanvasIcon(tint = accent, size = 24.dp)
-            Spacer(modifier = Modifier.width(12.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = title,
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = accent
-                )
-                Spacer(modifier = Modifier.height(2.dp))
-                Text(
-                    text = subtitle,
-                    fontSize = 12.sp,
-                    color = palette.textSecondary
-                )
-            }
-            Text(
-                text = "›",
-                fontSize = 22.sp,
-                fontWeight = FontWeight.Light,
-                color = accent
+            .shadow(
+                elevation = 8.dp,
+                shape = RoundedCornerShape(50),
+                ambientColor = palette.glassShadowColor,
+                spotColor = palette.glassShadowColor
             )
-        }
+            .clip(RoundedCornerShape(50))
+            .background(palette.cardSurface)
+            .border(BorderStroke(1.dp, palette.glassRimBrush), RoundedCornerShape(50))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 9.dp)
+    ) {
+        Box(
+            modifier = Modifier
+                .size(8.dp)
+                .clip(CircleShape)
+                .background(dotColor)
+        )
+        Spacer(modifier = Modifier.width(8.dp))
+        Text(
+            text = label,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = palette.textPrimary
+        )
     }
 }
 
 @Composable
-private fun AcousticBreathingOrb(
+private fun AuraLiquidGlassOrb(
     isRunning: Boolean,
     micLevel: Float,
     flashType: PulseEventType,
     onToggle: () -> Unit
 ) {
     val palette = LocalOriginPalette.current
-    val infiniteTransition = rememberInfiniteTransition(label = "orbBreathing")
-    val breathPhase by infiniteTransition.animateFloat(
+    val infinite = rememberInfiniteTransition(label = "liquidGlassOrb")
+
+    val breathPhase by infinite.animateFloat(
         initialValue = 0f,
         targetValue = 1f,
         animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 2400, easing = LinearEasing),
+            animation = tween(durationMillis = 2800, easing = LinearEasing),
             repeatMode = RepeatMode.Reverse
         ),
-        label = "breathPhase"
+        label = "orbBreath"
+    )
+
+    val slowRotation by infinite.animateFloat(
+        initialValue = 0f,
+        targetValue = 360f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 26000, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "causticRotation"
     )
 
     val smoothedMic by animateFloatAsState(
         targetValue = if (isRunning) (micLevel * 7.5f).coerceIn(0f, 1f) else 0f,
         animationSpec = tween(durationMillis = 120, easing = FastOutSlowInEasing),
-        label = "micAmplitude"
+        label = "micScale"
     )
 
-    val targetCoreColor = when {
-        !isRunning -> if (palette.isDark) Color(0xFF334155) else Color(0xFF94A3B8)
-        flashType == PulseEventType.SELF_HIT -> palette.alertCoral
-        flashType == PulseEventType.OTHER_FILTERED -> palette.shieldEmerald
-        else -> palette.accentBlue
+    val auraTintTarget = when {
+        !isRunning -> Color.Transparent
+        flashType == PulseEventType.SELF_HIT -> palette.alertCoral.copy(alpha = 0.28f)
+        flashType == PulseEventType.OTHER_FILTERED -> palette.shieldEmerald.copy(alpha = 0.25f)
+        else -> palette.accentCyan.copy(alpha = 0.10f)
     }
-    val targetGlowColor = when {
-        !isRunning -> if (palette.isDark) Color(0xFF1E293B) else Color(0xFFCBD5E1)
-        flashType == PulseEventType.SELF_HIT -> palette.alertCoral
-        flashType == PulseEventType.OTHER_FILTERED -> palette.shieldEmerald
-        else -> palette.accentCyan
-    }
+    val auraTint by animateColorAsState(
+        targetValue = auraTintTarget,
+        animationSpec = tween(durationMillis = 350),
+        label = "orbAuraTint"
+    )
 
-    val coreColor by animateColorAsState(
-        targetValue = targetCoreColor,
-        animationSpec = tween(durationMillis = 320),
-        label = "coreColor"
+    val ringColorTarget = when {
+        !isRunning -> Color.White.copy(alpha = if (palette.isDark) 0.16f else 0.55f)
+        flashType == PulseEventType.SELF_HIT -> palette.alertCoral
+        flashType == PulseEventType.OTHER_FILTERED -> palette.shieldEmerald
+        else -> Color.White
+    }
+    val ringColor by animateColorAsState(
+        targetValue = ringColorTarget,
+        animationSpec = tween(durationMillis = 350),
+        label = "orbRingColor"
     )
-    val glowColor by animateColorAsState(
-        targetValue = targetGlowColor,
-        animationSpec = tween(durationMillis = 320),
-        label = "glowColor"
-    )
+
+    val orbScale = if (isRunning) {
+        1.0f + 0.035f * breathPhase + 0.09f * smoothedMic
+    } else {
+        0.96f + 0.015f * breathPhase
+    }
 
     Box(
         contentAlignment = Alignment.Center,
-        modifier = Modifier.size(216.dp)
+        modifier = Modifier.size(252.dp)
     ) {
+        // Concentric delicate glass ripples matching Style A mockup
         Canvas(modifier = Modifier.fillMaxSize()) {
-            val center = this.center
-            val baseR = size.minDimension * 0.29f
+            val c = this.center
+            val rBase = size.minDimension * 0.31f
+
+            val r1 = rBase * (1.18f + 0.06f * breathPhase + 0.14f * smoothedMic)
+            val r2 = rBase * (1.38f + 0.10f * breathPhase + 0.22f * smoothedMic)
+            val r3 = rBase * (1.56f + 0.14f * breathPhase + 0.28f * smoothedMic)
 
             if (isRunning) {
-                val outerR = baseR * (1.35f + 0.16f * breathPhase + 0.30f * smoothedMic)
-                val midR = baseR * (1.16f + 0.10f * breathPhase + 0.18f * smoothedMic)
-
                 drawCircle(
                     brush = Brush.radialGradient(
                         colors = listOf(
-                            glowColor.copy(alpha = 0.24f),
-                            glowColor.copy(alpha = 0.0f)
+                            palette.accentCyan.copy(alpha = if (palette.isDark) 0.26f else 0.22f),
+                            palette.accentLavender.copy(alpha = 0.12f),
+                            Color.Transparent
                         ),
-                        center = center,
-                        radius = outerR * 1.12f
+                        center = c,
+                        radius = r3
                     ),
-                    radius = outerR * 1.12f,
-                    center = center
+                    radius = r3,
+                    center = c
                 )
+            }
 
+            drawCircle(
+                color = ringColor.copy(alpha = if (isRunning) 0.65f else 0.38f),
+                radius = r1,
+                center = c,
+                style = Stroke(width = 1.4.dp.toPx())
+            )
+            drawCircle(
+                color = ringColor.copy(alpha = if (isRunning) 0.38f else 0.20f),
+                radius = r2,
+                center = c,
+                style = Stroke(width = 1.1.dp.toPx())
+            )
+            if (isRunning) {
                 drawCircle(
-                    color = glowColor.copy(alpha = 0.20f),
-                    radius = outerR,
-                    center = center,
-                    style = Stroke(width = 2.dp.toPx())
-                )
-
-                drawCircle(
-                    color = coreColor.copy(alpha = 0.32f),
-                    radius = midR,
-                    center = center,
-                    style = Stroke(width = 3.dp.toPx())
-                )
-            } else {
-                drawCircle(
-                    color = glowColor.copy(alpha = 0.35f),
-                    radius = baseR * 1.15f,
-                    center = center,
-                    style = Stroke(width = 1.5.dp.toPx())
+                    color = ringColor.copy(alpha = 0.18f),
+                    radius = r3,
+                    center = c,
+                    style = Stroke(width = 0.9.dp.toPx())
                 )
             }
         }
 
-        // Tactile center orb button
+        // Genuine 3D Iridescent Liquid-Glass Sphere asset
         val interactionSource = remember { MutableInteractionSource() }
         Box(
             contentAlignment = Alignment.Center,
             modifier = Modifier
-                .size(126.dp)
+                .size(162.dp)
+                .graphicsLayer {
+                    scaleX = orbScale
+                    scaleY = orbScale
+                }
                 .shadow(
-                    elevation = if (isRunning) 14.dp else 4.dp,
+                    elevation = if (isRunning) 22.dp else 10.dp,
                     shape = CircleShape,
-                    ambientColor = coreColor,
-                    spotColor = coreColor
+                    ambientColor = palette.accentCyan.copy(alpha = 0.35f),
+                    spotColor = palette.accentLavender.copy(alpha = 0.45f)
                 )
                 .clip(CircleShape)
-                .background(
-                    brush = Brush.linearGradient(
-                        colors = if (isRunning) {
-                            listOf(coreColor, glowColor)
-                        } else {
-                            listOf(coreColor, coreColor.copy(alpha = 0.85f))
-                        }
-                    )
+                .border(
+                    BorderStroke(
+                        width = 1.6.dp,
+                        brush = Brush.linearGradient(
+                            colors = listOf(
+                                Color.White.copy(alpha = 0.95f),
+                                Color.White.copy(alpha = 0.30f),
+                                palette.accentCyan.copy(alpha = 0.65f)
+                            )
+                        )
+                    ),
+                    CircleShape
                 )
                 .clickable(
                     interactionSource = interactionSource,
@@ -365,69 +369,83 @@ private fun AcousticBreathingOrb(
                     onClick = onToggle
                 )
         ) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                MicCanvasIcon(tint = Color.White, size = 32.dp)
-                Spacer(modifier = Modifier.height(6.dp))
-                Text(
-                    text = if (isRunning) {
-                        when (flashType) {
-                            PulseEventType.SELF_HIT -> "抓到了！"
-                            PulseEventType.OTHER_FILTERED -> "已过滤旁人"
-                            PulseEventType.NONE -> "守护中"
-                        }
-                    } else {
-                        "点击开启"
-                    },
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = Color.White
-                )
-                Text(
-                    text = if (isRunning) "轻触暂停" else "后台静默监听",
-                    fontSize = 10.sp,
-                    color = Color.White.copy(alpha = 0.82f)
-                )
-            }
+            Image(
+                painter = painterResource(id = R.drawable.aura_orb_sphere),
+                contentDescription = "开启或暂停语音守护",
+                contentScale = ContentScale.Crop,
+                colorFilter = if (auraTint != Color.Transparent) {
+                    ColorFilter.tint(auraTint, BlendMode.SrcAtop)
+                } else {
+                    null
+                },
+                modifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer {
+                        rotationZ = if (isRunning) slowRotation else 0f
+                        alpha = if (isRunning) 1.0f else 0.80f
+                    }
+            )
         }
     }
 }
 
 @Composable
-private fun LiveStreamPreviewBox(uiState: MonitorUiState) {
+private fun FrostedWaveformCard(
+    uiState: MonitorUiState,
+    flashType: PulseEventType
+) {
     val palette = LocalOriginPalette.current
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(16.dp))
-            .background(palette.cardSubtleSurface)
-            .padding(horizontal = 14.dp, vertical = 11.dp)
+    val waveAccent = when (flashType) {
+        PulseEventType.SELF_HIT -> palette.alertCoral
+        PulseEventType.OTHER_FILTERED -> palette.shieldEmerald
+        PulseEventType.NONE -> palette.accentBlue
+    }
+
+    OriginGlassCard(
+        modifier = Modifier.fillMaxWidth(),
+        contentPadding = PaddingValues(horizontal = 18.dp, vertical = 16.dp)
     ) {
+        SymmetricHarmonicWaveform(
+            level = uiState.micLevel,
+            isActive = uiState.isRunning,
+            accentColor = waveAccent,
+            secondaryColor = palette.accentLavender,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(48.dp)
+        )
+
+        Spacer(modifier = Modifier.height(10.dp))
+
         Row(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween,
             modifier = Modifier.fillMaxWidth()
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                WaveBarsIcon(
-                    tint = palette.accentBlue,
-                    level = (uiState.micLevel * 8f).coerceIn(0.15f, 1f),
-                    size = 18.dp
-                )
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(
-                    text = "实时离线听写（仅内存预览，绝不保存）",
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.Medium,
-                    color = palette.textSecondary
-                )
-            }
+            Text(
+                text = when {
+                    !uiState.isRunning -> "离线语音声呐已就绪 · 零上传云端"
+                    uiState.livePreviewText.isNotBlank() -> uiState.livePreviewText
+                    else -> "正在聆听周围对话，说一句「没有」或「不是」试试…"
+                },
+                fontSize = 13.sp,
+                color = if (uiState.isRunning && uiState.livePreviewText.isNotBlank()) {
+                    palette.textPrimary
+                } else {
+                    palette.textMuted
+                },
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
+            )
 
             val sim = uiState.lastSimilarityScore
             val wasSelf = uiState.lastSimilarityWasSelf
-            if (sim != null && wasSelf != null) {
+            if (uiState.isRunning && sim != null && wasSelf != null) {
+                Spacer(modifier = Modifier.width(8.dp))
                 val badgeBg = if (wasSelf) palette.alertContainer else palette.shieldContainer
                 val badgeFg = if (wasSelf) palette.alertCoral else palette.shieldEmerald
-                val prefix = if (wasSelf) "本人" else "他人拦截"
+                val prefix = if (wasSelf) "本人" else "拦截"
                 OriginPillBadge(backgroundColor = badgeBg) {
                     Text(
                         text = "$prefix ${(sim * 100).roundToInt()}%",
@@ -438,19 +456,6 @@ private fun LiveStreamPreviewBox(uiState: MonitorUiState) {
                 }
             }
         }
-
-        Spacer(modifier = Modifier.height(6.dp))
-        Text(
-            text = if (uiState.livePreviewText.isNotBlank()) {
-                uiState.livePreviewText
-            } else {
-                "正在聆听周围语音，说一句「没有」或「不是」试试…"
-            },
-            fontSize = 13.sp,
-            color = if (uiState.livePreviewText.isNotBlank()) palette.textPrimary else palette.textMuted,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis
-        )
     }
 }
 
@@ -476,7 +481,7 @@ private fun ActivityTimelineSection(
             modifier = Modifier.fillMaxWidth()
         ) {
             Text(
-                text = "实时拦截与抓包动态",
+                text = "声呐记录",
                 fontSize = 16.sp,
                 fontWeight = FontWeight.Bold,
                 color = palette.textPrimary
@@ -493,7 +498,7 @@ private fun ActivityTimelineSection(
                                 if (active) palette.accentBlue else palette.cardSubtleSurface
                             )
                             .clickable { onSelectFilter(idx) }
-                            .padding(horizontal = 10.dp, vertical = 4.dp)
+                            .padding(horizontal = 11.dp, vertical = 4.dp)
                     ) {
                         Text(
                             text = label,
@@ -513,13 +518,13 @@ private fun ActivityTimelineSection(
                 contentAlignment = Alignment.Center,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(vertical = 22.dp)
+                    .padding(vertical = 20.dp)
             ) {
                 Text(
                     text = when (selectedFilter) {
                         1 -> "还没有抓到你本人说口头禅，继续保持！"
-                        2 -> "暂无被声纹护盾过滤的他人语音记录"
-                        else -> "开启监听后，本人触发与旁人过滤记录会实时显示在这里"
+                        2 -> "暂无被声纹护盾过滤的他人语音"
+                        else -> "开启守护后，本人触发与旁人过滤记录将显示在这里"
                     },
                     fontSize = 13.sp,
                     color = palette.textMuted
@@ -529,7 +534,7 @@ private fun ActivityTimelineSection(
             filteredList.take(25).forEachIndexed { index, item ->
                 if (index > 0) {
                     HorizontalDivider(
-                        color = palette.cardBorder.copy(alpha = 0.6f),
+                        color = palette.cardBorder.copy(alpha = 0.45f),
                         modifier = Modifier.padding(vertical = 10.dp)
                     )
                 }
@@ -568,9 +573,9 @@ private fun TimelineEventRow(item: HitRecord) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
                         text = if (isSelf) {
-                            "本人说出「${item.word}」"
+                            "本人「${item.word}」"
                         } else {
-                            "已过滤他人声音「${item.word}」"
+                            "过滤他人「${item.word}」"
                         },
                         fontSize = 14.sp,
                         fontWeight = FontWeight.SemiBold,
@@ -607,7 +612,7 @@ private fun TimelineEventRow(item: HitRecord) {
             if (item.snippet.isNotBlank()) {
                 Spacer(modifier = Modifier.height(3.dp))
                 Text(
-                    text = "识别语境：「${item.snippet}」",
+                    text = "「${item.snippet}」",
                     fontSize = 12.sp,
                     color = palette.textSecondary
                 )
@@ -621,14 +626,14 @@ private fun TimelineEventRow(item: HitRecord) {
                         if (ok) {
                             Toast.makeText(
                                 context,
-                                "已将这段原声加入你的声纹库，相同语气下次必中！",
+                                "已将这段原声加入声纹库，同样语气下次必中！",
                                 Toast.LENGTH_SHORT
                             ).show()
                         }
                     }
                 ) {
                     Text(
-                        text = "其实是我说的 · 点此一键校准学习",
+                        text = "其实是我说的 · 点此学习声纹",
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Bold,
                         color = palette.accentBlue

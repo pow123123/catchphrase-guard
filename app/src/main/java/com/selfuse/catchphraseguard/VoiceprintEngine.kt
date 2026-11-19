@@ -12,6 +12,7 @@ import android.util.Log
 import androidx.core.content.ContextCompat
 import com.k2fsa.sherpa.onnx.SpeakerEmbeddingExtractor
 import com.k2fsa.sherpa.onnx.SpeakerEmbeddingExtractorConfig
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -211,6 +212,157 @@ object VoiceprintManager {
         val norm = sqrt(sumSq).toFloat()
         if (norm < 1e-8f) return vec
         return FloatArray(vec.size) { vec[it] / norm }
+    }
+
+    suspend fun captureInteractiveUtterance(
+        context: Context,
+        stopSignal: CompletableDeferred<Unit>,
+        autoStopOnSilence: Boolean = true,
+        maxDurationMs: Long = 9000L,
+        multiScale: Boolean = true,
+        onLiveFeedback: (elapsedSec: Float, rmsLevel: Float, voicedSec: Float) -> Unit
+    ): VoiceCaptureResult = withContext(Dispatchers.IO) {
+        val appContext = context.applicationContext
+        val hasMic = ContextCompat.checkSelfPermission(
+            appContext,
+            Manifest.permission.RECORD_AUDIO
+        ) == PackageManager.PERMISSION_GRANTED
+        if (!hasMic) {
+            return@withContext VoiceCaptureResult.Error("缺少麦克风权限，请先允许录音权限")
+        }
+
+        val wasServiceRunning = MonitorStateStore.uiState.value.isRunning
+        if (wasServiceRunning) {
+            val pauseIntent = Intent(appContext, MonitorForegroundService::class.java).apply {
+                action = MonitorForegroundService.ACTION_PAUSE_FOR_ENROLL
+            }
+            appContext.startService(pauseIntent)
+            var waited = 0
+            while (!MonitorStateStore.uiState.value.isMicPausedForEnroll && waited < 18) {
+                delay(50)
+                waited++
+            }
+            delay(80)
+        }
+
+        var audioRecord: AudioRecord? = null
+        try {
+            val chunkSamples = 1280 // 80ms per frame at 16kHz
+            val minBuf = AudioRecord.getMinBufferSize(
+                SAMPLE_RATE,
+                AudioFormat.CHANNEL_IN_MONO,
+                AudioFormat.ENCODING_PCM_16BIT
+            )
+            val bufferBytes = maxOf(minBuf, chunkSamples * 2) * 2
+            audioRecord = createCleanAudioRecord(bufferBytes)
+            if (audioRecord.state != AudioRecord.STATE_INITIALIZED) {
+                return@withContext VoiceCaptureResult.Error("麦克风繁忙，请稍后重试")
+            }
+
+            audioRecord.startRecording()
+            val shortBuf = ShortArray(chunkSamples)
+            val allChunks = ArrayList<FloatArray>()
+            val chunkRmsList = ArrayList<Float>()
+            var voicedChunkCount = 0
+            var trailingSilenceChunks = 0
+            val voiceGate = 0.0065f
+            val startMs = SystemClock.elapsedRealtime()
+
+            while (isActive) {
+                val elapsedMs = SystemClock.elapsedRealtime() - startMs
+                if (stopSignal.isCompleted || elapsedMs >= maxDurationMs) break
+
+                val read = audioRecord.read(shortBuf, 0, shortBuf.size)
+                if (read <= 0) {
+                    delay(20)
+                    continue
+                }
+
+                var sumSq = 0.0
+                val chunk = FloatArray(read)
+                for (i in 0 until read) {
+                    val f = (shortBuf[i] / 32768.0f).coerceIn(-1.0f, 1.0f)
+                    chunk[i] = f
+                    sumSq += f * f
+                }
+                val rms = sqrt(sumSq / read).toFloat()
+                allChunks.add(chunk)
+                chunkRmsList.add(rms)
+
+                if (rms >= voiceGate) {
+                    voicedChunkCount++
+                    trailingSilenceChunks = 0
+                } else if (voicedChunkCount > 0) {
+                    trailingSilenceChunks++
+                }
+
+                val voicedSecNow = (voicedChunkCount * chunkSamples).toFloat() / SAMPLE_RATE
+                val elapsedSecNow = (SystemClock.elapsedRealtime() - startMs) / 1000f
+                onLiveFeedback(elapsedSecNow, rms, voicedSecNow)
+
+                // Hands-free natural pause completion: spoke >= 1.0s and paused >= 0.72s (9 chunks)
+                if (autoStopOnSilence && voicedSecNow >= 1.0f && trailingSilenceChunks >= 9) {
+                    break
+                }
+            }
+            onLiveFeedback(0f, 0f, 0f)
+
+            val activeSec = (voicedChunkCount * chunkSamples).toFloat() / SAMPLE_RATE
+            if (activeSec < 0.55f || allChunks.isEmpty()) {
+                return@withContext VoiceCaptureResult.TooQuiet
+            }
+
+            val firstVoiced = chunkRmsList.indexOfFirst { it >= voiceGate }.coerceAtLeast(0)
+            val lastVoiced = chunkRmsList.indexOfLast { it >= voiceGate }.coerceAtLeast(firstVoiced)
+            val startIdx = (firstVoiced - 1).coerceAtLeast(0)
+            val endIdx = (lastVoiced + 1).coerceAtMost(allChunks.lastIndex)
+
+            var totalSamples = 0
+            for (i in startIdx..endIdx) {
+                totalSamples += allChunks[i].size
+            }
+            val continuousSpeech = FloatArray(totalSamples)
+            var offset = 0
+            for (i in startIdx..endIdx) {
+                val arr = allChunks[i]
+                System.arraycopy(arr, 0, continuousSpeech, offset, arr.size)
+                offset += arr.size
+            }
+
+            val embeddings = if (multiScale) {
+                extractMultiScaleEmbeddings(appContext, continuousSpeech)
+            } else {
+                extractEmbedding(appContext, continuousSpeech, SAMPLE_RATE)?.let { listOf(it) } ?: emptyList()
+            }
+
+            if (embeddings.isEmpty()) {
+                return@withContext VoiceCaptureResult.Error("声纹提取未成功，请再随口说一句")
+            }
+
+            VoiceCaptureResult.Success(
+                embeddings = embeddings,
+                primaryEmbedding = embeddings.first(),
+                activeDurationSec = activeSec
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Error in captureInteractiveUtterance", e)
+            VoiceCaptureResult.Error("录音异常：${e.localizedMessage ?: "未知错误"}")
+        } finally {
+            try {
+                audioRecord?.stop()
+            } catch (_: Exception) {
+            }
+            try {
+                audioRecord?.release()
+            } catch (_: Exception) {
+            }
+            if (wasServiceRunning) {
+                val resumeIntent = Intent(appContext, MonitorForegroundService::class.java).apply {
+                    action = MonitorForegroundService.ACTION_RESUME_AFTER_ENROLL
+                }
+                appContext.startService(resumeIntent)
+            }
+        }
     }
 
     suspend fun captureVoiceClipForEmbedding(

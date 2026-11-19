@@ -56,8 +56,13 @@ fun StatsAndSettingsTab(
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(horizontal = 18.dp, vertical = 12.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp)
+        contentPadding = PaddingValues(
+            start = 20.dp,
+            end = 20.dp,
+            top = 6.dp,
+            bottom = 112.dp
+        ),
+        verticalArrangement = Arrangement.spacedBy(18.dp)
     ) {
         item {
             DailyStatsOverviewCard(uiState = uiState)

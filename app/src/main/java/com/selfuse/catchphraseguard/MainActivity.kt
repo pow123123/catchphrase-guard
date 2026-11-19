@@ -13,8 +13,14 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.Crossfade
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -27,23 +33,23 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
-import androidx.compose.material3.NavigationBarItemDefaults
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -51,10 +57,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.selfuse.catchphraseguard.ui.AuraMeshBackdrop
 import com.selfuse.catchphraseguard.ui.CatchphraseOriginTheme
 import com.selfuse.catchphraseguard.ui.LocalOriginPalette
 import com.selfuse.catchphraseguard.ui.MicCanvasIcon
-import com.selfuse.catchphraseguard.ui.OriginPillBadge
 import com.selfuse.catchphraseguard.ui.RadarConsoleTab
 import com.selfuse.catchphraseguard.ui.StatsAndSettingsTab
 import com.selfuse.catchphraseguard.ui.VoiceprintAndWordsTab
@@ -68,7 +74,7 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             CatchphraseOriginTheme {
-                CatchphraseMainShell()
+                CatchphraseAuraShell()
             }
         }
     }
@@ -80,9 +86,8 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-private fun CatchphraseMainShell() {
+private fun CatchphraseAuraShell() {
     val context = LocalContext.current
-    val palette = LocalOriginPalette.current
     val uiState by MonitorStateStore.uiState.collectAsStateWithLifecycle()
     var currentTab by rememberSaveable { mutableIntStateOf(0) }
 
@@ -109,96 +114,21 @@ private fun CatchphraseMainShell() {
         }
     }
 
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(palette.backgroundBrush)
-    ) {
-        Scaffold(
-            containerColor = Color.Transparent,
-            topBar = {
-                OriginTopHeader(uiState = uiState)
-            },
-            bottomBar = {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(palette.navBarSurface)
-                        .navigationBarsPadding()
-                ) {
-                    HorizontalDivider(color = palette.cardBorder.copy(alpha = 0.7f))
-                    NavigationBar(
-                        containerColor = Color.Transparent,
-                        tonalElevation = 0.dp,
-                        modifier = Modifier.height(68.dp)
-                    ) {
-                        val itemColors = NavigationBarItemDefaults.colors(
-                            selectedIconColor = palette.accentBlue,
-                            selectedTextColor = palette.accentBlue,
-                            indicatorColor = palette.accentBlue.copy(alpha = if (palette.isDark) 0.22f else 0.14f),
-                            unselectedIconColor = palette.textMuted,
-                            unselectedTextColor = palette.textMuted
-                        )
+    Box(modifier = Modifier.fillMaxSize()) {
+        // Full-bleed ethereal pastel mesh aurora canvas
+        AuraMeshBackdrop()
 
-                        NavigationBarItem(
-                            selected = currentTab == 0,
-                            onClick = { currentTab = 0 },
-                            icon = {
-                                MicCanvasIcon(
-                                    tint = if (currentTab == 0) palette.accentBlue else palette.textMuted,
-                                    size = 22.dp
-                                )
-                            },
-                            label = {
-                                Text("监听主控", fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
-                            },
-                            colors = itemColors
-                        )
+        Column(modifier = Modifier.fillMaxSize()) {
+            AuraMinimalHeader(
+                currentTab = currentTab,
+                isRunning = uiState.isRunning
+            )
 
-                        NavigationBarItem(
-                            selected = currentTab == 1,
-                            onClick = { currentTab = 1 },
-                            icon = {
-                                Icon(
-                                    imageVector = Icons.Default.Person,
-                                    contentDescription = "声纹与词库",
-                                    modifier = Modifier.size(22.dp)
-                                )
-                            },
-                            label = {
-                                Text("声纹与词库", fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
-                            },
-                            colors = itemColors
-                        )
-
-                        NavigationBarItem(
-                            selected = currentTab == 2,
-                            onClick = { currentTab = 2 },
-                            icon = {
-                                Icon(
-                                    imageVector = Icons.Default.Settings,
-                                    contentDescription = "统计与设置",
-                                    modifier = Modifier.size(22.dp)
-                                )
-                            },
-                            label = {
-                                Text("统计与设置", fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
-                            },
-                            colors = itemColors
-                        )
-                    }
-                }
-            }
-        ) { innerPadding ->
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(innerPadding)
-            ) {
+            Box(modifier = Modifier.weight(1f)) {
                 Crossfade(
                     targetState = currentTab,
-                    animationSpec = tween(durationMillis = 220),
-                    label = "tabCrossfade"
+                    animationSpec = tween(durationMillis = 240),
+                    label = "auraTabCrossfade"
                 ) { tab ->
                     when (tab) {
                         0 -> RadarConsoleTab(
@@ -244,50 +174,183 @@ private fun CatchphraseMainShell() {
                 }
             }
         }
+
+        // Floating Frosted-Glass Capsule Bottom Dock (matching Style A mockup)
+        FloatingAuraGlassDock(
+            currentTab = currentTab,
+            onSelectTab = { currentTab = it },
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .navigationBarsPadding()
+                .padding(bottom = 14.dp)
+        )
     }
 }
 
 @Composable
-private fun OriginTopHeader(uiState: MonitorUiState) {
+private fun AuraMinimalHeader(
+    currentTab: Int,
+    isRunning: Boolean
+) {
     val palette = LocalOriginPalette.current
-    val vpReady = uiState.voiceprintProfile.isEnrolled && uiState.settings.voiceprintEnabled
+    val title = when (currentTab) {
+        0 -> "Voice Radar"
+        1 -> "Voiceprint Studio"
+        else -> "Insights & Studio"
+    }
+    val subtitle = when (currentTab) {
+        0 -> "口头禅流光声呐 · v3.0"
+        1 -> "自然闲聊声纹与词库"
+        else -> "统计看板与守护偏好"
+    }
+
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = Modifier
+            .fillMaxWidth()
+            .statusBarsPadding()
+            .padding(top = 12.dp, bottom = 6.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = title,
+                fontSize = 19.sp,
+                fontWeight = FontWeight.Bold,
+                color = palette.textPrimary
+            )
+            Spacer(modifier = Modifier.width(7.dp))
+            Box(
+                modifier = Modifier
+                    .size(8.dp)
+                    .shadow(
+                        elevation = if (isRunning) 6.dp else 0.dp,
+                        shape = CircleShape,
+                        ambientColor = palette.accentCyan,
+                        spotColor = palette.accentCyan
+                    )
+                    .clip(CircleShape)
+                    .background(
+                        if (isRunning) palette.accentCyan else palette.textMuted.copy(alpha = 0.45f)
+                    )
+            )
+        }
+        Spacer(modifier = Modifier.height(2.dp))
+        Text(
+            text = subtitle,
+            fontSize = 11.sp,
+            color = palette.textSecondary
+        )
+    }
+}
+
+@Composable
+private fun FloatingAuraGlassDock(
+    currentTab: Int,
+    onSelectTab: (Int) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val palette = LocalOriginPalette.current
+    val dockShape = RoundedCornerShape(36.dp)
+
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(16.dp),
+        modifier = modifier
+            .shadow(
+                elevation = 20.dp,
+                shape = dockShape,
+                ambientColor = palette.glassShadowColor,
+                spotColor = palette.glassShadowColor
+            )
+            .clip(dockShape)
+            .background(palette.navBarSurface)
+            .border(BorderStroke(1.3.dp, palette.glassRimBrush), dockShape)
+            .padding(horizontal = 16.dp, vertical = 10.dp)
+    ) {
+        DockBubbleItem(
+            selected = currentTab == 0,
+            label = "声呐",
+            onClick = { onSelectTab(0) }
+        ) { tint ->
+            MicCanvasIcon(tint = tint, size = 21.dp)
+        }
+
+        DockBubbleItem(
+            selected = currentTab == 1,
+            label = "声纹",
+            onClick = { onSelectTab(1) }
+        ) { tint ->
+            Icon(
+                imageVector = Icons.Default.Person,
+                contentDescription = "声纹与词库",
+                tint = tint,
+                modifier = Modifier.size(21.dp)
+            )
+        }
+
+        DockBubbleItem(
+            selected = currentTab == 2,
+            label = "统计",
+            onClick = { onSelectTab(2) }
+        ) { tint ->
+            Icon(
+                imageVector = Icons.Default.Settings,
+                contentDescription = "统计与设置",
+                tint = tint,
+                modifier = Modifier.size(21.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun DockBubbleItem(
+    selected: Boolean,
+    label: String,
+    onClick: () -> Unit,
+    iconContent: @Composable (Color) -> Unit
+) {
+    val palette = LocalOriginPalette.current
+    val interactionSource = remember { MutableInteractionSource() }
+
+    val bgTarget = if (selected) {
+        if (palette.isDark) Color(0xFF1E3A5F) else Color(0xFFE0F2FE)
+    } else {
+        Color.White.copy(alpha = if (palette.isDark) 0.05f else 0.45f)
+    }
+    val bubbleBg by animateColorAsState(
+        targetValue = bgTarget,
+        animationSpec = tween(durationMillis = 220),
+        label = "dockBubbleBg"
+    )
+    val iconTint = if (selected) palette.accentBlue else palette.textSecondary
 
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
-            .fillMaxWidth()
-            .statusBarsPadding()
-            .padding(horizontal = 20.dp, vertical = 14.dp)
+            .height(44.dp)
+            .clip(RoundedCornerShape(50))
+            .background(bubbleBg)
+            .border(
+                width = 1.dp,
+                color = Color.White.copy(alpha = if (selected) 0.85f else 0.35f),
+                shape = RoundedCornerShape(50)
+            )
+            .clickable(
+                interactionSource = interactionSource,
+                indication = null,
+                onClick = onClick
+            )
+            .padding(horizontal = if (selected) 16.dp else 13.dp)
     ) {
-        Column(modifier = Modifier.weight(1f)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    text = "口头禅猎手",
-                    fontSize = 22.sp,
-                    fontWeight = FontWeight.ExtraBold,
-                    color = palette.textPrimary
-                )
-                Spacer(modifier = Modifier.width(8.dp))
-                OriginPillBadge(
-                    backgroundColor = palette.accentBlue.copy(alpha = if (palette.isDark) 0.22f else 0.12f)
-                ) {
-                    Text(
-                        text = "v2.1",
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = palette.accentBlue
-                    )
-                }
-            }
-            Spacer(modifier = Modifier.height(2.dp))
+        iconContent(iconTint)
+        if (selected) {
+            Spacer(modifier = Modifier.width(6.dp))
             Text(
-                text = if (vpReady) {
-                    "全离线语音 + CAMP++ 声纹引擎 · 仅本人触发"
-                } else {
-                    "全离线本地识别 · 录音绝不上传云端"
-                },
+                text = label,
                 fontSize = 12.sp,
-                color = palette.textSecondary
+                fontWeight = FontWeight.Bold,
+                color = palette.accentBlue
             )
         }
     }

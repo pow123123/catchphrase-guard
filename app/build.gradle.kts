@@ -12,8 +12,8 @@ android {
         applicationId = "com.selfuse.catchphraseguard"
         minSdk = 26
         targetSdk = 35
-        versionCode = 200 + (System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 1)
-        versionName = "2.1.${System.getenv("GITHUB_RUN_NUMBER") ?: "1"}"
+        versionCode = 300 + (System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 1)
+        versionName = "3.0.${System.getenv("GITHUB_RUN_NUMBER") ?: "1"}"
 
         ndk {
             abiFilters += listOf("arm64-v8a")
