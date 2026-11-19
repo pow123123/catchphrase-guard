@@ -65,26 +65,26 @@ jobs:
       - name: Build signed Release APK
         run: |
           gradle assembleRelease --no-daemon --stacktrace
-          cp app/build/outputs/apk/release/app-release.apk "CatchphraseGuard-v3.0.${GITHUB_RUN_NUMBER}.apk"
-          ls -lh "CatchphraseGuard-v3.0.${GITHUB_RUN_NUMBER}.apk"
+          cp app/build/outputs/apk/release/app-release.apk "CatchphraseGuard-v3.1.${GITHUB_RUN_NUMBER}.apk"
+          ls -lh "CatchphraseGuard-v3.1.${GITHUB_RUN_NUMBER}.apk"
 
       - name: Upload APK to Actions Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: CatchphraseGuard-APK
-          path: CatchphraseGuard-v3.0.${{ github.run_number }}.apk
+          path: CatchphraseGuard-v3.1.${{ github.run_number }}.apk
           if-no-files-found: error
 
       - name: Publish APK to GitHub Releases (1-click mobile download)
         continue-on-error: true
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v3.0.${{ github.run_number }}
-          name: "口头禅猎手 v3.0.${{ github.run_number }}（流光液态玻璃美学 + 零念稿闲聊声纹版）"
+          tag_name: v3.1.${{ github.run_number }}
+          name: "口头禅猎手 v3.1.${{ github.run_number }}（通知推送图标同步升级）"
           body: |
-            ### v3.0 全面视觉重塑与自然交互升级
-            - **Aura Liquid Glass 流光液态玻璃界面**：弥散极光动态画布、3D 彩虹折射液态水晶球、对称细线声波频谱卡、底部悬浮毛玻璃胶囊 Dock。
-            - **定制高辨识度桌面图标**：拉丝银底盘 + 哑光米白陶瓷珊瑚橙声波键高清图标直装桌面。
-            - **零念稿「快问快答」声纹工坊**：彻底取消 3.5 秒固定读秒和书面台词，改为气泡日常提问与反驳梗（支持换题），像聊微信一样按住随口答松手即停，或轻点免提说完停顿 0.7 秒自动收尾！
-          files: CatchphraseGuard-v3.0.${{ github.run_number }}.apk
+            ### v3.1 推送消息与状态栏图标同步换新
+            - **推送横幅彩色大图标 (`setLargeIcon`)**：消息推送与常驻通知均嵌入圆角精修版「暖调金属陶瓷声波图标」。
+            - **状态栏五道声波小图标 (`ic_wave_notify`) + 珊瑚橙品牌色**：替换掉旧版麦克风小图标，全链路视觉统一。
+            - *小贴士：如果 vivo OriginOS 顶部横幅最左上角极小的系统应用角标因覆盖安装仍缓存旧图标，重启一次手机或卸载旧版重装即可彻底刷新系统图标缓存。*
+          files: CatchphraseGuard-v3.1.${{ github.run_number }}.apk
           make_latest: true

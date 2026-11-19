@@ -8,6 +8,14 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Canvas
+import android.graphics.Paint
+import android.graphics.PorterDuff
+import android.graphics.PorterDuffXfermode
+import android.graphics.Rect
+import android.graphics.RectF
 import android.os.Build
 import android.os.VibrationEffect
 import android.os.Vibrator
@@ -21,9 +29,38 @@ import kotlin.math.roundToInt
 object NotificationHelper {
     const val ONGOING_NOTIFICATION_ID = 1001
     const val STATUS_CHANNEL_ID = "monitor_ongoing_status"
-    const val ALERT_CHANNEL_ID = "catchphrase_alert_push_v1"
+    const val ALERT_CHANNEL_ID = "catchphrase_alert_push_v2"
+    private const val BRAND_ACCENT_COLOR = 0xFFFF6B4A.toInt() // Coral-orange matching Icon B
 
     private val alertSequence = AtomicInteger(0)
+
+    @Volatile
+    private var cachedBrandIconBitmap: Bitmap? = null
+
+    private fun getBrandLargeIcon(context: Context): Bitmap? {
+        cachedBrandIconBitmap?.let { return it }
+        return try {
+            val raw = BitmapFactory.decodeResource(context.resources, R.drawable.ic_launcher_art)
+                ?: return null
+            val targetPx = 192
+            val scaled = Bitmap.createScaledBitmap(raw, targetPx, targetPx, true)
+            val rounded = Bitmap.createBitmap(targetPx, targetPx, Bitmap.Config.ARGB_8888)
+            val canvas = Canvas(rounded)
+            val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+            val rect = Rect(0, 0, targetPx, targetPx)
+            val rectF = RectF(rect)
+            val cornerRadius = targetPx * 0.24f // OriginOS squircle corner ratio
+
+            canvas.drawRoundRect(rectF, cornerRadius, cornerRadius, paint)
+            paint.xfermode = PorterDuffXfermode(PorterDuff.Mode.SRC_IN)
+            canvas.drawBitmap(scaled, rect, rect, paint)
+
+            cachedBrandIconBitmap = rounded
+            rounded
+        } catch (_: Exception) {
+            null
+        }
+    }
 
     fun ensureChannels(context: Context) {
         val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
@@ -87,8 +124,9 @@ object NotificationHelper {
         }
         val modeTag = if (voiceprintProtected) "声纹护盾开启" else "全员监听"
 
-        return NotificationCompat.Builder(context, STATUS_CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_mic_notify)
+        val builder = NotificationCompat.Builder(context, STATUS_CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_wave_notify)
+            .setColor(BRAND_ACCENT_COLOR)
             .setContentTitle("口头禅守护中 · 今日 $todayTotalCount 次 ($modeTag)")
             .setContentText("盯防词：$wordsText")
             .setOngoing(true)
@@ -96,7 +134,9 @@ object NotificationHelper {
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
             .setContentIntent(openPendingIntent)
             .addAction(0, "停止监听", stopPendingIntent)
-            .build()
+
+        getBrandLargeIcon(context)?.let { builder.setLargeIcon(it) }
+        return builder.build()
     }
 
     fun updateOngoingNotification(
@@ -156,8 +196,9 @@ object NotificationHelper {
             "今日第 $todayCount 次抓到你说「$word」$simTag"
         }
 
-        val notification = NotificationCompat.Builder(context, ALERT_CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_mic_notify)
+        val builder = NotificationCompat.Builder(context, ALERT_CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_wave_notify)
+            .setColor(BRAND_ACCENT_COLOR)
             .setContentTitle("抓到口头禅：【$word】")
             .setContentText(bodyText)
             .setStyle(NotificationCompat.BigTextStyle().bigText(bodyText))
@@ -166,11 +207,12 @@ object NotificationHelper {
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setAutoCancel(true)
             .setContentIntent(openPendingIntent)
-            .build()
+
+        getBrandLargeIcon(context)?.let { builder.setLargeIcon(it) }
 
         val notificationId = 2000 + (alertSequence.getAndIncrement() % 8)
         try {
-            NotificationManagerCompat.from(context).notify(notificationId, notification)
+            NotificationManagerCompat.from(context).notify(notificationId, builder.build())
         } catch (_: SecurityException) {
         }
     }

@@ -199,7 +199,7 @@ private fun AuraMinimalHeader(
         else -> "Insights & Studio"
     }
     val subtitle = when (currentTab) {
-        0 -> "口头禅流光声呐 · v3.0"
+        0 -> "口头禅流光声呐 · v3.1"
         1 -> "自然闲聊声纹与词库"
         else -> "统计看板与守护偏好"
     }
