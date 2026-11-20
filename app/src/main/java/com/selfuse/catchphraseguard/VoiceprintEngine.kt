@@ -19,6 +19,13 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import kotlin.math.sqrt
 
+data class VoiceDecision(
+    val isSelf: Boolean,
+    val selfScore: Float,
+    /** Highest similarity to a "不是我" sample, or null if there are none. */
+    val negativeScore: Float?
+)
+
 sealed class VoiceCaptureResult {
     data class Success(
         val embeddings: List<FloatArray>,
@@ -179,6 +186,39 @@ object VoiceprintManager {
         val second = if (matches.size > 1) matches[1] else best
         val score = 0.75f * best + 0.25f * second
         return score.coerceIn(0f, 1f)
+    }
+
+    /**
+     * v5 decision rule. A voice counts as the user's when it is similar enough to the enrolled
+     * voiceprint AND clearly closer to it than to any voice the user marked "不是我".
+     */
+    fun decide(
+        liveEmbedding: FloatArray,
+        profile: VoiceprintProfile,
+        threshold: Float,
+        negativeMargin: Float = 0.05f
+    ): VoiceDecision {
+        val selfScore = computeBestSimilarity(liveEmbedding, profile.enrolledVectors)
+        val negativeScore = if (profile.negativeVectors.isEmpty()) {
+            null
+        } else {
+            val norm = l2Normalize(liveEmbedding)
+            profile.negativeVectors
+                .filter { it.size == norm.size }
+                .maxOfOrNull { ref ->
+                    var dot = 0f
+                    for (i in norm.indices) dot += norm[i] * ref[i]
+                    dot
+                }
+                ?.coerceIn(0f, 1f)
+        }
+        val passesThreshold = selfScore >= threshold
+        val beatsNegatives = negativeScore == null || selfScore - negativeScore >= negativeMargin
+        return VoiceDecision(
+            isSelf = passesThreshold && beatsNegatives,
+            selfScore = selfScore,
+            negativeScore = negativeScore
+        )
     }
 
     fun buildEnrolledReferenceSet(stepEmbeddings: List<FloatArray>): List<FloatArray> {

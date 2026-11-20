@@ -8,80 +8,39 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import org.json.JSONArray
 import org.json.JSONObject
+import java.time.Instant
 import java.time.LocalDate
 import java.time.LocalDateTime
-import java.time.LocalTime
+import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 
-data class KeywordItem(
-    val word: String,
-    val enabled: Boolean = true,
-    val todayCount: Int = 0,
-    val totalCount: Int = 0
-)
-
-data class HitRecord(
-    val id: Long,
-    val time: String,
-    val word: String,
-    val snippet: String,
-    val todayCountAfterHit: Int,
-    val isSelfVoice: Boolean = true,
-    val similarity: Float? = null,
-    val calibratedManually: Boolean = false,
-    val transientEmbedding: FloatArray? = null
-)
-
-data class MonitorSettings(
-    val pushAlertEnabled: Boolean = true,
-    val vibrateEnabled: Boolean = true,
-    val cooldownSeconds: Int = 3,
-    val micBoost: Boolean = false,
-    val nearVoiceFilter: Boolean = false,
-    val voiceprintEnabled: Boolean = true,
-    val voiceprintThreshold: Float = 0.35f
-)
-
-data class VoiceprintProfile(
-    val enrolledVectors: List<FloatArray> = emptyList(),
-    val sampleCount: Int = 0,
-    val updatedAtText: String = ""
-) {
-    val isEnrolled: Boolean get() = enrolledVectors.isNotEmpty()
-}
-
-enum class PulseEventType {
-    NONE,
-    SELF_HIT,
-    OTHER_FILTERED
-}
-
-data class MonitorUiState(
-    val isRunning: Boolean = false,
-    val isMicPausedForEnroll: Boolean = false,
-    val statusMessage: String = "待机中 · 点击下方开启守护",
-    val livePreviewText: String = "",
-    val micLevel: Float = 0f,
-    val lastSimilarityScore: Float? = null,
-    val lastSimilarityWasSelf: Boolean? = null,
-    val lastEventPulseType: PulseEventType = PulseEventType.NONE,
-    val lastEventTimestampMs: Long = 0L,
-    val todayFilteredOthersCount: Int = 0,
-    val voiceprintProfile: VoiceprintProfile = VoiceprintProfile(),
-    val keywords: List<KeywordItem> = emptyList(),
-    val recentHits: List<HitRecord> = emptyList(),
-    val settings: MonitorSettings = MonitorSettings()
-)
-
+/**
+ * Single source of truth for v5. All mutations go through this object and are persisted
+ * to SharedPreferences. Thread-safe via @Synchronized on mutators.
+ */
 object MonitorStateStore {
     private const val PREFS_NAME = "catchphrase_guard_prefs"
+
+    // Keys carried over from v1–v4 (migrated in place)
     private const val KEY_KEYWORDS = "keywords_json"
     private const val KEY_HITS = "hits_json"
     private const val KEY_SETTINGS = "settings_json"
     private const val KEY_VOICEPRINT = "voiceprint_json"
     private const val KEY_STAT_DATE = "stat_date"
     private const val KEY_FILTERED_TODAY = "filtered_others_today"
-    private const val KEY_CALIBRATED_V21 = "threshold_migrated_v21"
+
+    // New in v5
+    private const val KEY_SESSIONS = "sessions_json_v5"
+    private const val KEY_DAILY = "daily_json_v5"
+    private const val KEY_ACTIVE_SESSION = "active_session_json_v5"
+    private const val KEY_ONBOARDING_DONE = "onboarding_done_v5"
+
+    private const val MAX_RECENT_HITS = 60
+    private const val MAX_SESSIONS = 150
+    private const val MAX_DAILY_DAYS = 120
+    private const val MAX_NEGATIVE_VECTORS = 20
+    private const val MAX_ENROLLED_VECTORS = 24
+    private const val MIN_SESSION_SEC_FOR_SUMMARY = 30L
 
     private val timeFormatter = DateTimeFormatter.ofPattern("HH:mm:ss")
     private val dateTimeFormatter = DateTimeFormatter.ofPattern("MM-dd HH:mm")
@@ -93,6 +52,10 @@ object MonitorStateStore {
     private val _uiState = MutableStateFlow(MonitorUiState())
     val uiState: StateFlow<MonitorUiState> = _uiState.asStateFlow()
 
+    // ---------------------------------------------------------------------
+    // Init & day rollover
+    // ---------------------------------------------------------------------
+
     @Synchronized
     fun ensureInitialized(context: Context) {
         if (initialized) {
@@ -100,38 +63,53 @@ object MonitorStateStore {
             return
         }
         prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+
+        val isExistingUser = prefs.contains(KEY_KEYWORDS)
         val today = LocalDate.now().toString()
         val savedDate = prefs.getString(KEY_STAT_DATE, null)
 
         var keywords = loadKeywords()
-        var filteredToday = prefs.getInt(KEY_FILTERED_TODAY, 0)
-        if (savedDate != null && savedDate != today) {
-            keywords = keywords.map { it.copy(todayCount = 0) }
-            filteredToday = 0
-            saveKeywords(keywords)
-            prefs.edit().putInt(KEY_FILTERED_TODAY, 0).apply()
+        var daily = loadDaily()
+
+        // Migrate v4 "todayCount" into a daily record so history isn't lost.
+        if (daily.isEmpty() && savedDate != null) {
+            val legacyCounts = keywords.filter { it.todayCount > 0 }.associate { it.word to it.todayCount }
+            if (legacyCounts.isNotEmpty()) {
+                daily = listOf(
+                    DailyStat(
+                        date = savedDate,
+                        perWordCounts = legacyCounts,
+                        filteredOthers = prefs.getInt(KEY_FILTERED_TODAY, 0)
+                    )
+                )
+                saveDaily(daily)
+            }
         }
+
+        // Keyword.todayCount is always derived from today's daily record.
+        val todayStat = daily.firstOrNull { it.date == today }
+        keywords = keywords.map { it.copy(todayCount = todayStat?.perWordCounts?.get(it.word) ?: 0) }
+        saveKeywords(keywords)
         prefs.edit().putString(KEY_STAT_DATE, today).apply()
 
-        val hits = loadHits()
-        var settings = loadSettings()
-        if (!prefs.getBoolean(KEY_CALIBRATED_V21, false)) {
-            if (settings.voiceprintThreshold >= 0.45f) {
-                settings = settings.copy(voiceprintThreshold = 0.35f)
-                saveSettings(settings)
-            }
-            prefs.edit().putBoolean(KEY_CALIBRATED_V21, true).apply()
+        val onboardingDone = if (prefs.contains(KEY_ONBOARDING_DONE)) {
+            prefs.getBoolean(KEY_ONBOARDING_DONE, false)
+        } else {
+            isExistingUser.also { prefs.edit().putBoolean(KEY_ONBOARDING_DONE, it).apply() }
         }
 
-        val vpProfile = loadVoiceprintProfile()
-
-        _uiState.update { current ->
-            current.copy(
+        _uiState.update {
+            it.copy(
+                initialized = true,
+                onboardingCompleted = onboardingDone,
                 keywords = keywords,
-                recentHits = hits,
-                settings = settings,
-                voiceprintProfile = vpProfile,
-                todayFilteredOthersCount = filteredToday
+                recentHits = loadHits(),
+                sessions = loadSessions(),
+                dailyStats = daily,
+                settings = loadSettings(),
+                voiceprintProfile = loadVoiceprintProfile(),
+                activeSession = loadActiveSession(),
+                todayFilteredOthersCount = todayStat?.filteredOthers ?: 0
             )
         }
         initialized = true
@@ -141,22 +119,30 @@ object MonitorStateStore {
     fun rollOverDateIfNeeded() {
         if (!initialized) return
         val today = LocalDate.now().toString()
-        val savedDate = prefs.getString(KEY_STAT_DATE, null)
-        if (savedDate != today) {
-            val resetKeywords = _uiState.value.keywords.map { it.copy(todayCount = 0) }
-            saveKeywords(resetKeywords)
-            prefs.edit()
-                .putString(KEY_STAT_DATE, today)
-                .putInt(KEY_FILTERED_TODAY, 0)
-                .apply()
-            _uiState.update {
-                it.copy(
-                    keywords = resetKeywords,
-                    todayFilteredOthersCount = 0
-                )
-            }
+        if (prefs.getString(KEY_STAT_DATE, null) == today) return
+        val todayStat = _uiState.value.dailyStats.firstOrNull { it.date == today }
+        val keywords = _uiState.value.keywords.map {
+            it.copy(todayCount = todayStat?.perWordCounts?.get(it.word) ?: 0)
+        }
+        saveKeywords(keywords)
+        prefs.edit().putString(KEY_STAT_DATE, today).apply()
+        _uiState.update {
+            it.copy(
+                keywords = keywords,
+                todayFilteredOthersCount = todayStat?.filteredOthers ?: 0
+            )
         }
     }
+
+    @Synchronized
+    fun completeOnboarding() {
+        prefs.edit().putBoolean(KEY_ONBOARDING_DONE, true).apply()
+        _uiState.update { it.copy(onboardingCompleted = true) }
+    }
+
+    // ---------------------------------------------------------------------
+    // Live service state (not persisted)
+    // ---------------------------------------------------------------------
 
     fun setRunningState(running: Boolean, statusMessage: String) {
         _uiState.update {
@@ -174,190 +160,175 @@ object MonitorStateStore {
         _uiState.update {
             it.copy(
                 isMicPausedForEnroll = paused,
-                statusMessage = if (paused) "声纹采集中（后台监听已暂时让位）" else "正在后台静默守护中",
                 micLevel = if (paused) 0f else it.micLevel
             )
         }
     }
 
     fun updateLivePreview(text: String, micLevel: Float) {
-        _uiState.update {
-            it.copy(
-                livePreviewText = text,
-                micLevel = micLevel
-            )
-        }
+        _uiState.update { it.copy(livePreviewText = text, micLevel = micLevel) }
     }
 
+    // ---------------------------------------------------------------------
+    // Session lifecycle (called by the foreground service)
+    // ---------------------------------------------------------------------
+
+    /** Starts a session, or returns the one already running. */
     @Synchronized
-    fun saveEnrolledVoiceprint(allExtractedEmbeddings: List<FloatArray>, stepCount: Int = 3) {
-        val referenceSet = VoiceprintManager.buildEnrolledReferenceSet(allExtractedEmbeddings)
-        val profile = VoiceprintProfile(
-            enrolledVectors = referenceSet,
-            sampleCount = stepCount,
-            updatedAtText = LocalDateTime.now().format(dateTimeFormatter)
-        )
-        persistVoiceprintProfile(profile)
-        val updatedSettings = _uiState.value.settings.copy(voiceprintEnabled = true)
-        saveSettings(updatedSettings)
-        _uiState.update {
-            it.copy(
-                voiceprintProfile = profile,
-                settings = updatedSettings
-            )
-        }
-    }
-
-    @Synchronized
-    fun learnSelfFromFilteredHit(hitId: Long): Boolean {
-        val state = _uiState.value
-        val target = state.recentHits.firstOrNull { it.id == hitId && !it.isSelfVoice } ?: return false
-        val emb = target.transientEmbedding ?: return false
-
-        val normEmb = VoiceprintManager.l2Normalize(emb)
-        val mergedVectors = (state.voiceprintProfile.enrolledVectors + listOf(normEmb)).takeLast(18)
-        val updatedProfile = state.voiceprintProfile.copy(
-            enrolledVectors = mergedVectors,
-            sampleCount = (state.voiceprintProfile.sampleCount + 1).coerceAtLeast(1),
-            updatedAtText = LocalDateTime.now().format(dateTimeFormatter)
-        )
-        persistVoiceprintProfile(updatedProfile)
-
-        var newWordTodayCount = 1
-        val updatedKeywords = state.keywords.map { kw ->
-            if (kw.word == target.word) {
-                newWordTodayCount = kw.todayCount + 1
-                kw.copy(todayCount = newWordTodayCount, totalCount = kw.totalCount + 1)
-            } else {
-                kw
-            }
-        }
-        val newFilteredCount = (state.todayFilteredOthersCount - 1).coerceAtLeast(0)
-        prefs.edit().putInt(KEY_FILTERED_TODAY, newFilteredCount).apply()
-
-        val updatedHits = state.recentHits.map { item ->
-            if (item.id == hitId) {
-                item.copy(
-                    isSelfVoice = true,
-                    todayCountAfterHit = newWordTodayCount,
-                    calibratedManually = true,
-                    transientEmbedding = null
-                )
-            } else {
-                item
-            }
-        }
-        saveKeywords(updatedKeywords)
-        saveHits(updatedHits)
-
-        _uiState.update {
-            it.copy(
-                voiceprintProfile = updatedProfile,
-                keywords = updatedKeywords,
-                recentHits = updatedHits,
-                todayFilteredOthersCount = newFilteredCount,
-                lastSimilarityWasSelf = true
-            )
-        }
-        return true
-    }
-
-    @Synchronized
-    fun clearVoiceprint() {
-        val emptyProfile = VoiceprintProfile()
-        persistVoiceprintProfile(emptyProfile)
-        _uiState.update {
-            it.copy(
-                voiceprintProfile = emptyProfile,
-                lastSimilarityScore = null,
-                lastSimilarityWasSelf = null
-            )
-        }
-    }
-
-    @Synchronized
-    fun addKeyword(rawWord: String): Boolean {
-        val cleaned = rawWord.trim()
-        if (cleaned.isEmpty()) return false
-        val current = _uiState.value.keywords
-        if (current.any { it.word == cleaned }) return false
-        val updated = current + KeywordItem(word = cleaned, enabled = true)
-        saveKeywords(updated)
-        _uiState.update { it.copy(keywords = updated) }
-        return true
-    }
-
-    @Synchronized
-    fun toggleKeyword(word: String, enabled: Boolean) {
-        val updated = _uiState.value.keywords.map {
-            if (it.word == word) it.copy(enabled = enabled) else it
-        }
-        saveKeywords(updated)
-        _uiState.update { it.copy(keywords = updated) }
-    }
-
-    @Synchronized
-    fun removeKeyword(word: String) {
-        val updated = _uiState.value.keywords.filterNot { it.word == word }
-        saveKeywords(updated)
-        _uiState.update { it.copy(keywords = updated) }
-    }
-
-    @Synchronized
-    fun resetTodayCounts() {
-        val updated = _uiState.value.keywords.map { it.copy(todayCount = 0) }
-        saveKeywords(updated)
-        saveHits(emptyList())
-        prefs.edit().putInt(KEY_FILTERED_TODAY, 0).apply()
-        _uiState.update {
-            it.copy(
-                keywords = updated,
-                recentHits = emptyList(),
-                todayFilteredOthersCount = 0
-            )
-        }
-    }
-
-    @Synchronized
-    fun updateSettings(transform: (MonitorSettings) -> MonitorSettings) {
-        val updated = transform(_uiState.value.settings)
-        saveSettings(updated)
-        _uiState.update { it.copy(settings = updated) }
-    }
-
-    @Synchronized
-    fun recordSelfKeywordHit(word: String, fullUtterance: String, similarity: Float?): HitRecord {
-        rollOverDateIfNeeded()
-        var newTodayCount = 1
-        val updatedKeywords = _uiState.value.keywords.map { item ->
-            if (item.word == word) {
-                newTodayCount = item.todayCount + 1
-                item.copy(
-                    todayCount = newTodayCount,
-                    totalCount = item.totalCount + 1
-                )
-            } else {
-                item
-            }
-        }
-        val snippet = formatSnippet(fullUtterance)
-        val nowMs = System.currentTimeMillis()
-        val record = HitRecord(
+    fun startSession(plannedDurationMs: Long?, nowMs: Long = System.currentTimeMillis()): ActiveSession {
+        _uiState.value.activeSession?.let { return it }
+        val session = ActiveSession(
             id = nowMs,
-            time = LocalTime.now().format(timeFormatter),
-            word = word,
-            snippet = snippet,
-            todayCountAfterHit = newTodayCount,
-            isSelfVoice = true,
-            similarity = similarity
+            startAtMs = nowMs,
+            plannedDurationMs = plannedDurationMs?.takeIf { it > 0L }
         )
-        val updatedHits = (listOf(record) + _uiState.value.recentHits).take(50)
-        saveKeywords(updatedKeywords)
-        saveHits(updatedHits)
+        persistActiveSession(session)
+        _uiState.update { it.copy(activeSession = session, pendingSummary = null) }
+        return session
+    }
+
+    @Synchronized
+    fun pauseSession(durationMs: Long, nowMs: Long = System.currentTimeMillis()) {
+        val s = _uiState.value.activeSession ?: return
+        val base = foldPause(s, nowMs)
+        val paused = base.copy(pauseStartedAtMs = nowMs, pausedUntilMs = nowMs + durationMs)
+        persistActiveSession(paused)
+        _uiState.update { it.copy(activeSession = paused) }
+    }
+
+    @Synchronized
+    fun resumeSession(nowMs: Long = System.currentTimeMillis()) {
+        val s = _uiState.value.activeSession ?: return
+        if (s.pauseStartedAtMs == null) return
+        val resumed = foldPause(s, nowMs)
+        persistActiveSession(resumed)
+        _uiState.update { it.copy(activeSession = resumed) }
+    }
+
+    /** Moves any current pause into pausedAccumMs and clears pause fields. */
+    private fun foldPause(s: ActiveSession, nowMs: Long): ActiveSession {
+        val start = s.pauseStartedAtMs ?: return s
+        val until = s.pausedUntilMs ?: nowMs
+        val pausedMs = (minOf(nowMs, until) - start).coerceAtLeast(0L)
+        return s.copy(
+            pausedAccumMs = s.pausedAccumMs + pausedMs,
+            pauseStartedAtMs = null,
+            pausedUntilMs = null
+        )
+    }
+
+    /**
+     * Ends the active session, writes it to history, and sets pendingSummary when the session
+     * is long enough (or caught something). Returns the record, or null if nothing was active.
+     */
+    @Synchronized
+    fun endSession(nowMs: Long = System.currentTimeMillis()): SessionRecord? {
+        val active = _uiState.value.activeSession ?: return null
+        val folded = foldPause(active, nowMs)
+        val monitoredSec = folded.monitoredMs(nowMs) / 1000L
+
+        val sessionHits = _uiState.value.recentHits
+            .filter { it.sessionId == active.id }
+            .sortedBy { it.timeMs }
+            .map { it.copy(transientEmbedding = null) }
+
+        val record = SessionRecord(
+            id = active.id,
+            startAtMs = active.startAtMs,
+            endAtMs = nowMs,
+            monitoredSec = monitoredSec,
+            perWordCounts = folded.perWordCounts,
+            filteredOthers = folded.filteredOthers,
+            hits = sessionHits
+        )
+
+        val sessions = (listOf(record) + _uiState.value.sessions).take(MAX_SESSIONS)
+        val dateKey = dateKeyOf(active.startAtMs)
+        val daily = upsertDaily(_uiState.value.dailyStats, dateKey) {
+            it.copy(
+                monitoredSec = it.monitoredSec + monitoredSec,
+                sessionCount = it.sessionCount + 1
+            )
+        }
+
+        saveSessions(sessions)
+        saveDaily(daily)
+        persistActiveSession(null)
+
+        val showSummary = monitoredSec >= MIN_SESSION_SEC_FOR_SUMMARY || record.totalCount > 0
         _uiState.update {
             it.copy(
-                keywords = updatedKeywords,
-                recentHits = updatedHits,
+                activeSession = null,
+                sessions = sessions,
+                dailyStats = daily,
+                pendingSummary = if (showSummary) record else null
+            )
+        }
+        return record
+    }
+
+    @Synchronized
+    fun dismissSummary() {
+        _uiState.update { it.copy(pendingSummary = null) }
+    }
+
+    /**
+     * Drops the active session without writing history (e.g. the service failed to go
+     * foreground right after starting). Counts already recorded to keywords/days are kept.
+     */
+    @Synchronized
+    fun discardActiveSession() {
+        persistActiveSession(null)
+        _uiState.update { it.copy(activeSession = null) }
+    }
+
+    // ---------------------------------------------------------------------
+    // Hits
+    // ---------------------------------------------------------------------
+
+    @Synchronized
+    fun recordSelfKeywordHit(
+        word: String,
+        fullUtterance: String,
+        similarity: Float?,
+        embedding: FloatArray? = null,
+        nowMs: Long = System.currentTimeMillis()
+    ): HitRecord {
+        rollOverDateIfNeeded()
+        val state = _uiState.value
+        val active = state.activeSession
+
+        val keywords = state.keywords.map {
+            if (it.word == word) it.copy(todayCount = it.todayCount + 1, totalCount = it.totalCount + 1) else it
+        }
+        val daily = upsertDaily(state.dailyStats, dateKeyOf(nowMs)) {
+            it.copy(perWordCounts = it.perWordCounts.incremented(word, 1))
+        }
+        val updatedActive = active?.copy(perWordCounts = active.perWordCounts.incremented(word, 1))
+
+        val record = HitRecord(
+            id = nextHitId(nowMs),
+            timeMs = nowMs,
+            time = formatTime(nowMs),
+            word = word,
+            snippet = formatSnippet(fullUtterance),
+            isSelfVoice = true,
+            similarity = similarity,
+            sessionId = active?.id,
+            transientEmbedding = embedding
+        )
+        val hits = trimEmbeddings(listOf(record) + state.recentHits).take(MAX_RECENT_HITS)
+
+        saveKeywords(keywords)
+        saveDaily(daily)
+        saveHits(hits)
+        persistActiveSession(updatedActive)
+        _uiState.update {
+            it.copy(
+                keywords = keywords,
+                dailyStats = daily,
+                recentHits = hits,
+                activeSession = updatedActive,
                 lastSimilarityScore = similarity,
                 lastSimilarityWasSelf = true,
                 lastEventPulseType = PulseEventType.SELF_HIT,
@@ -372,31 +343,41 @@ object MonitorStateStore {
         word: String,
         fullUtterance: String,
         similarity: Float,
-        liveEmbedding: FloatArray? = null
+        liveEmbedding: FloatArray? = null,
+        nowMs: Long = System.currentTimeMillis()
     ): HitRecord {
         rollOverDateIfNeeded()
-        val currentWordCount = _uiState.value.keywords.firstOrNull { it.word == word }?.todayCount ?: 0
-        val newFilteredCount = _uiState.value.todayFilteredOthersCount + 1
-        prefs.edit().putInt(KEY_FILTERED_TODAY, newFilteredCount).apply()
+        val state = _uiState.value
+        val active = state.activeSession
 
-        val snippet = formatSnippet(fullUtterance)
-        val nowMs = System.currentTimeMillis()
+        val daily = upsertDaily(state.dailyStats, dateKeyOf(nowMs)) {
+            it.copy(filteredOthers = it.filteredOthers + 1)
+        }
+        val updatedActive = active?.copy(filteredOthers = active.filteredOthers + 1)
+
         val record = HitRecord(
-            id = nowMs,
-            time = LocalTime.now().format(timeFormatter),
+            id = nextHitId(nowMs),
+            timeMs = nowMs,
+            time = formatTime(nowMs),
             word = word,
-            snippet = snippet,
-            todayCountAfterHit = currentWordCount,
+            snippet = formatSnippet(fullUtterance),
             isSelfVoice = false,
             similarity = similarity,
+            sessionId = active?.id,
             transientEmbedding = liveEmbedding
         )
-        val updatedHits = (listOf(record) + _uiState.value.recentHits).take(50)
-        saveHits(updatedHits)
+        val hits = trimEmbeddings(listOf(record) + state.recentHits).take(MAX_RECENT_HITS)
+
+        saveDaily(daily)
+        saveHits(hits)
+        persistActiveSession(updatedActive)
         _uiState.update {
             it.copy(
-                recentHits = updatedHits,
-                todayFilteredOthersCount = newFilteredCount,
+                dailyStats = daily,
+                recentHits = hits,
+                activeSession = updatedActive,
+                todayFilteredOthersCount = daily.firstOrNull { d -> d.date == LocalDate.now().toString() }
+                    ?.filteredOthers ?: it.todayFilteredOthersCount,
                 lastSimilarityScore = similarity,
                 lastSimilarityWasSelf = false,
                 lastEventPulseType = PulseEventType.OTHER_FILTERED,
@@ -406,61 +387,389 @@ object MonitorStateStore {
         return record
     }
 
-    private fun formatSnippet(fullUtterance: String): String {
-        return if (fullUtterance.length > 26) {
-            "…" + fullUtterance.takeLast(26)
+    /**
+     * User says a counted self hit was not them. Removes it from every count (keyword, day,
+     * active or finished session) and, if we still have its voiceprint, stores it as a
+     * negative sample so similar voices are rejected next time.
+     * Returns true if something changed.
+     */
+    @Synchronized
+    fun markNotMe(hitId: Long): Boolean {
+        val state = _uiState.value
+        val hit = findHit(state, hitId) ?: return false
+        if (!hit.isSelfVoice || hit.undone) return false
+
+        val word = hit.word
+        val isToday = dateKeyOf(hit.timeMs) == LocalDate.now().toString()
+
+        val keywords = state.keywords.map {
+            if (it.word == word) {
+                it.copy(
+                    todayCount = if (isToday) (it.todayCount - 1).coerceAtLeast(0) else it.todayCount,
+                    totalCount = (it.totalCount - 1).coerceAtLeast(0)
+                )
+            } else {
+                it
+            }
+        }
+        val daily = upsertDaily(state.dailyStats, dateKeyOf(hit.timeMs)) {
+            it.copy(perWordCounts = it.perWordCounts.incremented(word, -1))
+        }
+        val active = state.activeSession?.let { a ->
+            if (a.id == hit.sessionId) a.copy(perWordCounts = a.perWordCounts.incremented(word, -1)) else a
+        }
+        val sessions = state.sessions.map { s ->
+            if (s.id == hit.sessionId) undoInSession(s, hitId, word) else s
+        }
+        val pending = state.pendingSummary?.let { s ->
+            if (s.id == hit.sessionId) undoInSession(s, hitId, word) else s
+        }
+        val hits = state.recentHits.map {
+            if (it.id == hitId) it.copy(undone = true, transientEmbedding = null) else it
+        }
+
+        val embedding = state.recentHits.firstOrNull { it.id == hitId }?.transientEmbedding
+        val profile = if (embedding != null) {
+            val negatives = (state.voiceprintProfile.negativeVectors +
+                listOf(VoiceprintManager.l2Normalize(embedding))).takeLast(MAX_NEGATIVE_VECTORS)
+            state.voiceprintProfile.copy(negativeVectors = negatives).also { persistVoiceprintProfile(it) }
         } else {
-            fullUtterance
+            state.voiceprintProfile
+        }
+
+        saveKeywords(keywords)
+        saveDaily(daily)
+        saveSessions(sessions)
+        saveHits(hits)
+        persistActiveSession(active)
+        _uiState.update {
+            it.copy(
+                keywords = keywords,
+                dailyStats = daily,
+                activeSession = active,
+                sessions = sessions,
+                pendingSummary = pending,
+                recentHits = hits,
+                voiceprintProfile = profile
+            )
+        }
+        return true
+    }
+
+    /** Whether "不是我" can also teach the voiceprint model for this hit (embedding still in memory). */
+    fun canLearnFromHit(hitId: Long): Boolean =
+        _uiState.value.recentHits.firstOrNull { it.id == hitId }?.transientEmbedding != null
+
+    /**
+     * A filtered "other voice" hit was actually the user. Counts it and adds its voiceprint
+     * to the enrolled set.
+     */
+    @Synchronized
+    fun learnSelfFromFilteredHit(hitId: Long): Boolean {
+        val state = _uiState.value
+        val hit = state.recentHits.firstOrNull { it.id == hitId && !it.isSelfVoice } ?: return false
+        val emb = hit.transientEmbedding ?: return false
+        val word = hit.word
+        val isToday = dateKeyOf(hit.timeMs) == LocalDate.now().toString()
+
+        val enrolled = (state.voiceprintProfile.enrolledVectors +
+            listOf(VoiceprintManager.l2Normalize(emb))).takeLast(MAX_ENROLLED_VECTORS)
+        val profile = state.voiceprintProfile.copy(
+            enrolledVectors = enrolled,
+            sampleCount = state.voiceprintProfile.sampleCount + 1,
+            updatedAtText = LocalDateTime.now().format(dateTimeFormatter)
+        )
+        persistVoiceprintProfile(profile)
+
+        val keywords = state.keywords.map {
+            if (it.word == word) {
+                it.copy(
+                    todayCount = if (isToday) it.todayCount + 1 else it.todayCount,
+                    totalCount = it.totalCount + 1
+                )
+            } else {
+                it
+            }
+        }
+        val daily = upsertDaily(state.dailyStats, dateKeyOf(hit.timeMs)) {
+            it.copy(
+                perWordCounts = it.perWordCounts.incremented(word, 1),
+                filteredOthers = (it.filteredOthers - 1).coerceAtLeast(0)
+            )
+        }
+        val active = state.activeSession?.let { a ->
+            if (a.id == hit.sessionId) {
+                a.copy(
+                    perWordCounts = a.perWordCounts.incremented(word, 1),
+                    filteredOthers = (a.filteredOthers - 1).coerceAtLeast(0)
+                )
+            } else {
+                a
+            }
+        }
+        val hits = state.recentHits.map {
+            if (it.id == hitId) {
+                it.copy(isSelfVoice = true, calibratedManually = true, transientEmbedding = null)
+            } else {
+                it
+            }
+        }
+        val sessions = state.sessions.map { s ->
+            if (s.id == hit.sessionId) claimInSession(s, hitId, word) else s
+        }
+        val pending = state.pendingSummary?.let { s ->
+            if (s.id == hit.sessionId) claimInSession(s, hitId, word) else s
+        }
+
+        saveKeywords(keywords)
+        saveDaily(daily)
+        saveHits(hits)
+        saveSessions(sessions)
+        persistActiveSession(active)
+        _uiState.update {
+            it.copy(
+                voiceprintProfile = profile,
+                keywords = keywords,
+                dailyStats = daily,
+                activeSession = active,
+                recentHits = hits,
+                sessions = sessions,
+                pendingSummary = pending,
+                todayFilteredOthersCount = daily.firstOrNull { d -> d.date == LocalDate.now().toString() }
+                    ?.filteredOthers ?: it.todayFilteredOthersCount,
+                lastSimilarityWasSelf = true
+            )
+        }
+        return true
+    }
+
+    // ---------------------------------------------------------------------
+    // Keywords, settings, voiceprint, data
+    // ---------------------------------------------------------------------
+
+    @Synchronized
+    fun addKeyword(rawWord: String): Boolean {
+        val cleaned = rawWord.trim()
+        if (cleaned.isEmpty()) return false
+        val current = _uiState.value.keywords
+        if (current.any { it.word == cleaned }) return false
+        val updated = current + KeywordItem(word = cleaned)
+        saveKeywords(updated)
+        _uiState.update { it.copy(keywords = updated) }
+        return true
+    }
+
+    @Synchronized
+    fun toggleKeyword(word: String, enabled: Boolean) {
+        val updated = _uiState.value.keywords.map { if (it.word == word) it.copy(enabled = enabled) else it }
+        saveKeywords(updated)
+        _uiState.update { it.copy(keywords = updated) }
+    }
+
+    @Synchronized
+    fun removeKeyword(word: String) {
+        val updated = _uiState.value.keywords.filterNot { it.word == word }
+        saveKeywords(updated)
+        _uiState.update { it.copy(keywords = updated) }
+    }
+
+    @Synchronized
+    fun updateSettings(transform: (MonitorSettings) -> MonitorSettings) {
+        val updated = transform(_uiState.value.settings)
+        saveSettings(updated)
+        _uiState.update { it.copy(settings = updated) }
+    }
+
+    @Synchronized
+    fun saveEnrolledVoiceprint(allExtractedEmbeddings: List<FloatArray>, stepCount: Int = 3) {
+        val referenceSet = VoiceprintManager.buildEnrolledReferenceSet(allExtractedEmbeddings)
+        val profile = VoiceprintProfile(
+            enrolledVectors = referenceSet,
+            // Re-enrolling starts fresh; old "not me" samples may no longer apply.
+            negativeVectors = emptyList(),
+            sampleCount = stepCount,
+            updatedAtText = LocalDateTime.now().format(dateTimeFormatter)
+        )
+        persistVoiceprintProfile(profile)
+        val settings = _uiState.value.settings.copy(voiceprintEnabled = true)
+        saveSettings(settings)
+        _uiState.update { it.copy(voiceprintProfile = profile, settings = settings) }
+    }
+
+    @Synchronized
+    fun clearVoiceprint() {
+        val empty = VoiceprintProfile()
+        persistVoiceprintProfile(empty)
+        _uiState.update {
+            it.copy(voiceprintProfile = empty, lastSimilarityScore = null, lastSimilarityWasSelf = null)
         }
     }
 
+    @Synchronized
+    fun clearNegativeSamples() {
+        val profile = _uiState.value.voiceprintProfile.copy(negativeVectors = emptyList())
+        persistVoiceprintProfile(profile)
+        _uiState.update { it.copy(voiceprintProfile = profile) }
+    }
+
+    /** Clears history, counts and hits. Keeps keywords (counts reset), settings and voiceprint. */
+    @Synchronized
+    fun clearAllHistory() {
+        val keywords = _uiState.value.keywords.map { it.copy(todayCount = 0, totalCount = 0) }
+        saveKeywords(keywords)
+        saveHits(emptyList())
+        saveSessions(emptyList())
+        saveDaily(emptyList())
+        prefs.edit().putInt(KEY_FILTERED_TODAY, 0).apply()
+        _uiState.update {
+            it.copy(
+                keywords = keywords,
+                recentHits = emptyList(),
+                sessions = emptyList(),
+                dailyStats = emptyList(),
+                pendingSummary = null,
+                todayFilteredOthersCount = 0
+            )
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // Helpers
+    // ---------------------------------------------------------------------
+
+    private fun findHit(state: MonitorUiState, hitId: Long): HitRecord? =
+        state.recentHits.firstOrNull { it.id == hitId }
+            ?: state.pendingSummary?.hits?.firstOrNull { it.id == hitId }
+            ?: state.sessions.asSequence().flatMap { it.hits.asSequence() }.firstOrNull { it.id == hitId }
+
+    private fun undoInSession(s: SessionRecord, hitId: Long, word: String): SessionRecord = s.copy(
+        perWordCounts = s.perWordCounts.incremented(word, -1),
+        hits = s.hits.map { if (it.id == hitId) it.copy(undone = true) else it }
+    )
+
+    private fun claimInSession(s: SessionRecord, hitId: Long, word: String): SessionRecord = s.copy(
+        perWordCounts = s.perWordCounts.incremented(word, 1),
+        filteredOthers = (s.filteredOthers - 1).coerceAtLeast(0),
+        hits = s.hits.map {
+            if (it.id == hitId) it.copy(isSelfVoice = true, calibratedManually = true) else it
+        }
+    )
+
+    private fun upsertDaily(
+        stats: List<DailyStat>,
+        dateKey: String,
+        transform: (DailyStat) -> DailyStat
+    ): List<DailyStat> {
+        val existing = stats.firstOrNull { it.date == dateKey } ?: DailyStat(date = dateKey)
+        val updated = transform(existing)
+        val cutoff = LocalDate.now().minusDays(MAX_DAILY_DAYS.toLong()).toString()
+        return (stats.filterNot { it.date == dateKey } + updated)
+            .filter { it.date >= cutoff }
+            .sortedBy { it.date }
+    }
+
+    private fun Map<String, Int>.incremented(word: String, delta: Int): Map<String, Int> {
+        val next = ((this[word] ?: 0) + delta).coerceAtLeast(0)
+        return if (next == 0) this - word else this + (word to next)
+    }
+
+    /** Keep embeddings only on the newest hits to bound memory. */
+    private fun trimEmbeddings(hits: List<HitRecord>): List<HitRecord> =
+        hits.mapIndexed { idx, h -> if (idx >= 50 && h.transientEmbedding != null) h.copy(transientEmbedding = null) else h }
+
+    private var lastHitId = 0L
+    private fun nextHitId(nowMs: Long): Long {
+        val id = if (nowMs <= lastHitId) lastHitId + 1 else nowMs
+        lastHitId = id
+        return id
+    }
+
+    private fun dateKeyOf(ms: Long): String =
+        Instant.ofEpochMilli(ms).atZone(ZoneId.systemDefault()).toLocalDate().toString()
+
+    private fun formatTime(ms: Long): String =
+        Instant.ofEpochMilli(ms).atZone(ZoneId.systemDefault()).toLocalTime().format(timeFormatter)
+
+    private fun formatSnippet(s: String): String = if (s.length > 26) "…" + s.takeLast(26) else s
+
+    // ---------------------------------------------------------------------
+    // Persistence
+    // ---------------------------------------------------------------------
+
+    private fun mapToJson(map: Map<String, Int>): JSONObject =
+        JSONObject().apply { map.forEach { (k, v) -> put(k, v) } }
+
+    private fun jsonToMap(obj: JSONObject?): Map<String, Int> {
+        if (obj == null) return emptyMap()
+        val out = LinkedHashMap<String, Int>()
+        val keys = obj.keys()
+        while (keys.hasNext()) {
+            val k = keys.next()
+            out[k] = obj.optInt(k, 0)
+        }
+        return out
+    }
+
+    private fun hitToJson(h: HitRecord): JSONObject = JSONObject().apply {
+        put("id", h.id)
+        put("timeMs", h.timeMs)
+        put("time", h.time)
+        put("word", h.word)
+        put("snippet", h.snippet)
+        put("isSelfVoice", h.isSelfVoice)
+        put("undone", h.undone)
+        put("calibratedManually", h.calibratedManually)
+        h.similarity?.let { put("similarity", it.toDouble()) }
+        h.sessionId?.let { put("sessionId", it) }
+    }
+
+    private fun jsonToHit(o: JSONObject, fallbackId: Long): HitRecord = HitRecord(
+        id = o.optLong("id", fallbackId),
+        // v4 hits had no timeMs; fall back to id (it was a timestamp then)
+        timeMs = o.optLong("timeMs", o.optLong("id", fallbackId)),
+        time = o.optString("time", ""),
+        word = o.optString("word", ""),
+        snippet = o.optString("snippet", ""),
+        isSelfVoice = o.optBoolean("isSelfVoice", true),
+        similarity = if (o.has("similarity") && !o.isNull("similarity")) o.optDouble("similarity").toFloat() else null,
+        sessionId = if (o.has("sessionId") && !o.isNull("sessionId")) o.optLong("sessionId") else null,
+        undone = o.optBoolean("undone", false),
+        calibratedManually = o.optBoolean("calibratedManually", false)
+    )
+
     private fun loadKeywords(): List<KeywordItem> {
+        val defaults = listOf(KeywordItem("没有"), KeywordItem("不是"))
         val raw = prefs.getString(KEY_KEYWORDS, null)
         if (raw.isNullOrBlank()) {
-            val defaults = listOf(
-                KeywordItem(word = "没有", enabled = true),
-                KeywordItem(word = "不是", enabled = true)
-            )
             saveKeywords(defaults)
             return defaults
         }
         return try {
             val arr = JSONArray(raw)
-            buildList {
-                for (i in 0 until arr.length()) {
-                    val obj = arr.getJSONObject(i)
-                    val w = obj.optString("word").trim()
-                    if (w.isNotEmpty()) {
-                        add(
-                            KeywordItem(
-                                word = w,
-                                enabled = obj.optBoolean("enabled", true),
-                                todayCount = obj.optInt("todayCount", 0),
-                                totalCount = obj.optInt("totalCount", 0)
-                            )
-                        )
-                    }
-                }
+            (0 until arr.length()).mapNotNull { i ->
+                val o = arr.getJSONObject(i)
+                val w = o.optString("word").trim()
+                if (w.isEmpty()) null else KeywordItem(
+                    word = w,
+                    enabled = o.optBoolean("enabled", true),
+                    todayCount = o.optInt("todayCount", 0),
+                    totalCount = o.optInt("totalCount", 0)
+                )
             }
         } catch (_: Exception) {
-            listOf(
-                KeywordItem(word = "没有", enabled = true),
-                KeywordItem(word = "不是", enabled = true)
-            )
+            defaults
         }
     }
 
     private fun saveKeywords(list: List<KeywordItem>) {
         val arr = JSONArray()
-        for (item in list) {
-            arr.put(
-                JSONObject().apply {
-                    put("word", item.word)
-                    put("enabled", item.enabled)
-                    put("todayCount", item.todayCount)
-                    put("totalCount", item.totalCount)
-                }
-            )
+        list.forEach {
+            arr.put(JSONObject().apply {
+                put("word", it.word)
+                put("enabled", it.enabled)
+                put("todayCount", it.todayCount)
+                put("totalCount", it.totalCount)
+            })
         }
         prefs.edit().putString(KEY_KEYWORDS, arr.toString()).apply()
     }
@@ -469,24 +778,7 @@ object MonitorStateStore {
         val raw = prefs.getString(KEY_HITS, null) ?: return emptyList()
         return try {
             val arr = JSONArray(raw)
-            buildList {
-                for (i in 0 until arr.length()) {
-                    val obj = arr.getJSONObject(i)
-                    val hasSim = obj.has("similarity") && !obj.isNull("similarity")
-                    add(
-                        HitRecord(
-                            id = obj.optLong("id", System.currentTimeMillis() + i),
-                            time = obj.optString("time", ""),
-                            word = obj.optString("word", ""),
-                            snippet = obj.optString("snippet", ""),
-                            todayCountAfterHit = obj.optInt("todayCountAfterHit", 0),
-                            isSelfVoice = obj.optBoolean("isSelfVoice", true),
-                            similarity = if (hasSim) obj.optDouble("similarity", 0.0).toFloat() else null,
-                            calibratedManually = obj.optBoolean("calibratedManually", false)
-                        )
-                    )
-                }
-            }
+            (0 until arr.length()).map { i -> jsonToHit(arr.getJSONObject(i), System.currentTimeMillis() + i) }
         } catch (_: Exception) {
             emptyList()
         }
@@ -494,37 +786,142 @@ object MonitorStateStore {
 
     private fun saveHits(list: List<HitRecord>) {
         val arr = JSONArray()
-        for (item in list) {
-            arr.put(
-                JSONObject().apply {
-                    put("id", item.id)
-                    put("time", item.time)
-                    put("word", item.word)
-                    put("snippet", item.snippet)
-                    put("todayCountAfterHit", item.todayCountAfterHit)
-                    put("isSelfVoice", item.isSelfVoice)
-                    put("calibratedManually", item.calibratedManually)
-                    if (item.similarity != null) {
-                        put("similarity", item.similarity.toDouble())
-                    }
-                }
-            )
-        }
+        list.forEach { arr.put(hitToJson(it)) }
         prefs.edit().putString(KEY_HITS, arr.toString()).apply()
+    }
+
+    private fun loadSessions(): List<SessionRecord> {
+        val raw = prefs.getString(KEY_SESSIONS, null) ?: return emptyList()
+        return try {
+            val arr = JSONArray(raw)
+            (0 until arr.length()).map { i ->
+                val o = arr.getJSONObject(i)
+                val hitsArr = o.optJSONArray("hits") ?: JSONArray()
+                SessionRecord(
+                    id = o.optLong("id"),
+                    startAtMs = o.optLong("startAtMs"),
+                    endAtMs = o.optLong("endAtMs"),
+                    monitoredSec = o.optLong("monitoredSec"),
+                    perWordCounts = jsonToMap(o.optJSONObject("perWordCounts")),
+                    filteredOthers = o.optInt("filteredOthers", 0),
+                    hits = (0 until hitsArr.length()).map { j -> jsonToHit(hitsArr.getJSONObject(j), j.toLong()) }
+                )
+            }
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    private fun saveSessions(list: List<SessionRecord>) {
+        val arr = JSONArray()
+        list.forEach { s ->
+            val hitsArr = JSONArray()
+            s.hits.forEach { hitsArr.put(hitToJson(it)) }
+            arr.put(JSONObject().apply {
+                put("id", s.id)
+                put("startAtMs", s.startAtMs)
+                put("endAtMs", s.endAtMs)
+                put("monitoredSec", s.monitoredSec)
+                put("perWordCounts", mapToJson(s.perWordCounts))
+                put("filteredOthers", s.filteredOthers)
+                put("hits", hitsArr)
+            })
+        }
+        prefs.edit().putString(KEY_SESSIONS, arr.toString()).apply()
+    }
+
+    private fun loadDaily(): List<DailyStat> {
+        val raw = prefs.getString(KEY_DAILY, null) ?: return emptyList()
+        return try {
+            val arr = JSONArray(raw)
+            (0 until arr.length()).map { i ->
+                val o = arr.getJSONObject(i)
+                DailyStat(
+                    date = o.optString("date"),
+                    perWordCounts = jsonToMap(o.optJSONObject("perWordCounts")),
+                    monitoredSec = o.optLong("monitoredSec", 0L),
+                    filteredOthers = o.optInt("filteredOthers", 0),
+                    sessionCount = o.optInt("sessionCount", 0)
+                )
+            }.filter { it.date.isNotBlank() }.sortedBy { it.date }
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    private fun saveDaily(list: List<DailyStat>) {
+        val arr = JSONArray()
+        list.forEach { d ->
+            arr.put(JSONObject().apply {
+                put("date", d.date)
+                put("perWordCounts", mapToJson(d.perWordCounts))
+                put("monitoredSec", d.monitoredSec)
+                put("filteredOthers", d.filteredOthers)
+                put("sessionCount", d.sessionCount)
+            })
+        }
+        prefs.edit().putString(KEY_DAILY, arr.toString()).apply()
+    }
+
+    private fun loadActiveSession(): ActiveSession? {
+        val raw = prefs.getString(KEY_ACTIVE_SESSION, null) ?: return null
+        return try {
+            val o = JSONObject(raw)
+            ActiveSession(
+                id = o.getLong("id"),
+                startAtMs = o.getLong("startAtMs"),
+                plannedDurationMs = if (o.has("plannedDurationMs")) o.getLong("plannedDurationMs") else null,
+                pausedUntilMs = if (o.has("pausedUntilMs")) o.getLong("pausedUntilMs") else null,
+                pauseStartedAtMs = if (o.has("pauseStartedAtMs")) o.getLong("pauseStartedAtMs") else null,
+                pausedAccumMs = o.optLong("pausedAccumMs", 0L),
+                perWordCounts = jsonToMap(o.optJSONObject("perWordCounts")),
+                filteredOthers = o.optInt("filteredOthers", 0)
+            )
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun persistActiveSession(s: ActiveSession?) {
+        if (s == null) {
+            prefs.edit().remove(KEY_ACTIVE_SESSION).apply()
+            return
+        }
+        val o = JSONObject().apply {
+            put("id", s.id)
+            put("startAtMs", s.startAtMs)
+            s.plannedDurationMs?.let { put("plannedDurationMs", it) }
+            s.pausedUntilMs?.let { put("pausedUntilMs", it) }
+            s.pauseStartedAtMs?.let { put("pauseStartedAtMs", it) }
+            put("pausedAccumMs", s.pausedAccumMs)
+            put("perWordCounts", mapToJson(s.perWordCounts))
+            put("filteredOthers", s.filteredOthers)
+        }
+        prefs.edit().putString(KEY_ACTIVE_SESSION, o.toString()).apply()
     }
 
     private fun loadSettings(): MonitorSettings {
         val raw = prefs.getString(KEY_SETTINGS, null) ?: return MonitorSettings()
         return try {
-            val obj = JSONObject(raw)
+            val o = JSONObject(raw)
+            val vibration = when {
+                o.has("vibrationStyle") -> runCatching {
+                    VibrationStyle.valueOf(o.getString("vibrationStyle"))
+                }.getOrDefault(VibrationStyle.TRIPLE_SHORT)
+                // v4 had a boolean
+                o.has("vibrateEnabled") && !o.optBoolean("vibrateEnabled", true) -> VibrationStyle.OFF
+                else -> VibrationStyle.TRIPLE_SHORT
+            }
             MonitorSettings(
-                pushAlertEnabled = obj.optBoolean("pushAlertEnabled", true),
-                vibrateEnabled = obj.optBoolean("vibrateEnabled", true),
-                cooldownSeconds = obj.optInt("cooldownSeconds", 3).coerceIn(1, 30),
-                micBoost = obj.optBoolean("micBoost", false),
-                nearVoiceFilter = obj.optBoolean("nearVoiceFilter", false),
-                voiceprintEnabled = obj.optBoolean("voiceprintEnabled", true),
-                voiceprintThreshold = obj.optDouble("voiceprintThreshold", 0.35).toFloat().coerceIn(0.20f, 0.68f)
+                pushAlertEnabled = o.optBoolean("pushAlertEnabled", true),
+                vibrationStyle = vibration,
+                cooldownSeconds = o.optInt("cooldownSeconds", 3).coerceIn(1, 30),
+                micBoost = o.optBoolean("micBoost", false),
+                nearVoiceFilter = o.optBoolean("nearVoiceFilter", false),
+                voiceprintEnabled = o.optBoolean("voiceprintEnabled", true),
+                voiceprintThreshold = o.optDouble("voiceprintThreshold", 0.35).toFloat().coerceIn(0.20f, 0.68f),
+                goalPerHour = o.optDouble("goalPerHour", 4.0).toFloat().coerceIn(0.5f, 60f),
+                defaultDurationMinutes = o.optInt("defaultDurationMinutes", 0).coerceAtLeast(0)
             )
         } catch (_: Exception) {
             MonitorSettings()
@@ -532,64 +929,65 @@ object MonitorStateStore {
     }
 
     private fun saveSettings(s: MonitorSettings) {
-        val obj = JSONObject().apply {
+        val o = JSONObject().apply {
             put("pushAlertEnabled", s.pushAlertEnabled)
-            put("vibrateEnabled", s.vibrateEnabled)
+            put("vibrationStyle", s.vibrationStyle.name)
             put("cooldownSeconds", s.cooldownSeconds)
             put("micBoost", s.micBoost)
             put("nearVoiceFilter", s.nearVoiceFilter)
             put("voiceprintEnabled", s.voiceprintEnabled)
             put("voiceprintThreshold", s.voiceprintThreshold.toDouble())
+            put("goalPerHour", s.goalPerHour.toDouble())
+            put("defaultDurationMinutes", s.defaultDurationMinutes)
         }
-        prefs.edit().putString(KEY_SETTINGS, obj.toString()).apply()
+        prefs.edit().putString(KEY_SETTINGS, o.toString()).apply()
+    }
+
+    private fun vectorsToJson(vectors: List<FloatArray>): JSONArray {
+        val arr = JSONArray()
+        vectors.forEach { v ->
+            val inner = JSONArray()
+            v.forEach { inner.put(it.toDouble()) }
+            arr.put(inner)
+        }
+        return arr
+    }
+
+    private fun jsonToVectors(arr: JSONArray?): List<FloatArray> {
+        if (arr == null) return emptyList()
+        return (0 until arr.length()).mapNotNull { i ->
+            val inner = arr.getJSONArray(i)
+            val v = FloatArray(inner.length()) { j -> inner.getDouble(j).toFloat() }
+            if (v.isEmpty()) null else v
+        }
     }
 
     private fun loadVoiceprintProfile(): VoiceprintProfile {
         val raw = prefs.getString(KEY_VOICEPRINT, null) ?: return VoiceprintProfile()
         return try {
-            val obj = JSONObject(raw)
-            val sampleCount = obj.optInt("sampleCount", 0)
-            val updatedAt = obj.optString("updatedAtText", "")
-            val vecArr = obj.optJSONArray("vectors") ?: return VoiceprintProfile()
-            val vectors = ArrayList<FloatArray>(vecArr.length())
-            for (i in 0 until vecArr.length()) {
-                val inner = vecArr.getJSONArray(i)
-                val vec = FloatArray(inner.length())
-                for (j in 0 until inner.length()) {
-                    vec[j] = inner.getDouble(j).toFloat()
-                }
-                if (vec.isNotEmpty()) {
-                    vectors.add(vec)
-                }
-            }
+            val o = JSONObject(raw)
             VoiceprintProfile(
-                enrolledVectors = vectors,
-                sampleCount = sampleCount,
-                updatedAtText = updatedAt
+                enrolledVectors = jsonToVectors(o.optJSONArray("vectors")),
+                negativeVectors = jsonToVectors(o.optJSONArray("negativeVectors")),
+                sampleCount = o.optInt("sampleCount", 0),
+                updatedAtText = o.optString("updatedAtText", "")
             )
         } catch (_: Exception) {
             VoiceprintProfile()
         }
     }
 
-    private fun persistVoiceprintProfile(profile: VoiceprintProfile) {
-        if (!profile.isEnrolled) {
+    private fun persistVoiceprintProfile(p: VoiceprintProfile) {
+        if (!p.isEnrolled && p.negativeVectors.isEmpty()) {
             prefs.edit().remove(KEY_VOICEPRINT).apply()
             return
         }
-        val vecArr = JSONArray()
-        for (vec in profile.enrolledVectors) {
-            val inner = JSONArray()
-            for (v in vec) {
-                inner.put(v.toDouble())
-            }
-            vecArr.put(inner)
+        val o = JSONObject().apply {
+            put("sampleCount", p.sampleCount)
+            put("updatedAtText", p.updatedAtText)
+            put("vectors", vectorsToJson(p.enrolledVectors))
+            put("negativeVectors", vectorsToJson(p.negativeVectors))
         }
-        val obj = JSONObject().apply {
-            put("sampleCount", profile.sampleCount)
-            put("updatedAtText", profile.updatedAtText)
-            put("vectors", vecArr)
-        }
-        prefs.edit().putString(KEY_VOICEPRINT, obj.toString()).apply()
+        prefs.edit().putString(KEY_VOICEPRINT, o.toString()).apply()
     }
 }
